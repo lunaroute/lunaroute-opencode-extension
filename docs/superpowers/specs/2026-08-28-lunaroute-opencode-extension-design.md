@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 10 — after ninth review; value-shape recognition)
+Date: 2026-08-28 (rev 11 — after tenth review; guarded removal, per-surface gates)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -167,25 +167,41 @@ Verified from OpenCode source: the update path (`POST /config` →
 `<instance dir>/config.json`** — sending MCP headers through it would write
 the `lr_` key to a plaintext config file. The config hook, by contrast,
 mutates the in-memory live config for the session and is never written back
-by OpenCode. So MCP is injected exactly when a valid key exists at
-config-hook time: at startup, refreshed on instance reload, absent when no
-key exists.
+by OpenCode. So MCP is reconciled **exactly when the config hook runs** —
+at startup always, and on instance reload only if the host re-runs the hook
+(spike gate branch (a)/(b) below decides which; until decided, no claim of
+reload-time refresh is made anywhere).
 
 **Ownership rule (value-shape recognition — lifecycle-agnostic).** The
 plugin recognizes its own entry **by value, not by tracked identity**: an
 entry is **ours** iff `type === "remote"` && `url` equals the resolved MCP
 URL && `oauth === false` && `enabled === true` && the set of header names
-equals ours (`LUNAROUTE-API-KEY` + the attribution triple) — the key
-*value* is ignored (it legitimately rotates). This works identically
+equals ours (`LUNAROUTE-API-KEY` + the attribution triple — compared
+case-insensitively, per HTTP header semantics). This works identically
 whether a reload hands the hook a fresh config, a clone, or the same
 mutated object — no per-object provenance state exists to go stale.
-Anything else is **user-owned** and never touched. Documented trade-off: a
-user who hand-writes our exact shape (same URL, same headers) has their
-key value refreshed by us when a valid key exists — functionally the same
-server and credential scheme, so this is a refresh, not a takeover; the
-way to opt out is any shape divergence (e.g. `enabled: false`, a
-different URL, or an extra header), which makes the entry user-owned
-permanently.
+Anything else is **user-owned while its shape diverges** — restoring the
+exact shape re-enters plugin management (stateless recognition has no
+memory of past ownership). All header *values* in a managed entry are
+plugin-managed and rewritten on refresh (the attribution triple as well as
+the key).
+
+**Exact-shape collisions (documented, deliberate):** a user who hand-writes
+our exact shape gets a *refresh*, never a surprise removal — the no-key
+removal below fires only on credentials the plugin itself placed:
+
+- key present + ours → refresh: header values rewritten with the current
+  key and attribution (functionally the same server and credential scheme;
+  a refresh, not a takeover).
+- opt-out → any shape divergence (e.g. `enabled: false`, a different URL,
+  an extra header) makes the entry user-owned while diverged.
+- key absent + ours: the entry is removed **only if its `LUNAROUTE-API-KEY`
+  value equals the last credential this process read from auth.json**
+  (module state updated every hook run — i.e., we clean up only the
+  credential we placed and just observed disappearing). A managed-shape
+  entry carrying any other credential is left untouched with one info
+  log ("matches plugin shape but carries an unknown credential").
+  Hand-authored entries survive logged-out states.
 
 **Injection lifecycle — the complete decision matrix** (key = validated
 credential from auth.json; ours = matches the value shape above):
@@ -193,10 +209,11 @@ credential from auth.json; ours = matches the value shape above):
 | key | entry at hook entry | action |
 |---|---|---|
 | present | absent | inject |
-| present | ours | replace with current key |
+| present | ours | replace all header values with current key + attribution |
 | present | user-owned | leave untouched (one info log) |
 | absent | absent | nothing |
-| absent | ours | **remove our entry** (stale managed credential cleanup) |
+| absent | ours, credential = last seen | **remove** (stale managed credential cleanup) |
+| absent | ours, unknown credential | leave untouched (one info log) |
 | absent | user-owned | leave untouched |
 
 **Key resolution (single source of truth).** Auth resolution is unreliable
@@ -382,13 +399,17 @@ on this — the provider hook serves models on the next `/models` open.
   summary line),
   deterministic default-model rule (lexicographic first; empty → no
   auto-pick), in-flight fetch dedup.
-- `mcp.test.ts` — the full injection lifecycle matrix (six cells): key+absent
-  → inject; key+ours (value-shape match, key value ignored) → replace with
-  current key; key+user-owned → untouched (info log); no-key+absent →
-  nothing; **no-key+ours → entry removed**; no-key+user-owned → untouched.
-  Value-shape recognition cases: fresh config, cloned config, mutated
-  config — all classify identically; shape divergences (enabled toggled,
-  different url, extra header) → user-owned. Auth-file policy (missing
+- `mcp.test.ts` — the full injection lifecycle matrix (seven cells): key+
+  absent → inject; key+ours (value-shape match, key value ignored) →
+  replace all header values; key+user-owned → untouched (info log);
+  no-key+absent → nothing; no-key+ours+last-seen credential → **removed**;
+  no-key+ours+unknown credential → untouched (info log); no-key+
+  user-owned → untouched. **Exact-shape collision cases**: hand-authored
+  exact-shape entry with a valid key → header values refreshed; with no
+  key and its own credential → left untouched. Value-shape recognition
+  cases: fresh, cloned, and mutated config objects classify identically;
+  shape divergences (enabled toggled, different url, extra header,
+  header-name case variations) → user-owned. Auth-file policy (missing
   file → no credential; corrupt/unexpected shape → no credential + one
   warn; symlink followed; single read, no retry). Credential validation
   (control chars, oversize → skip). the post-login update payload contains
@@ -471,18 +492,23 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
    provenance rule — begin from a plugin-injected entry and assert the
    rotated key lands)? And on that reload: does a **user-defined
    `mcp.lunaroute` survive untouched** while an absent entry gets the
-   rotated key? (j) **removal e2e on the real reload path**: inject a key,
-   remove it from auth.json, trigger the supported reload, and assert the
-   plugin-managed entry is gone while a user-owned entry survives.
-   **Gate branches** (recorded, not assumed): (a) config hook re-runs on
-   reload (any config-object lifecycle — fresh/clone/mutated; the
-   value-shape rule handles all three) → reload support ships, README
-   says "automatic after login/rotation"; (b) config hook does not re-run
-   on reload → restart-only: README documents "restart after login or
-   rotation", nothing else changes, release proceeds; (c) chat loader
-   recreates on reload → rotation is automatic for chat too; else
-   restart-only documented. No branch blocks the release; the spike result
-   selects the branch.
+   rotated key? (j) **removal e2e on the supported reconciliation path** —
+   branch-specific: if gate branch (a) holds (hook re-runs on reload),
+   inject a key, remove it from auth.json, trigger the reload, and assert
+   the plugin-managed entry is gone while a user-owned entry survives; if
+   branch (b) holds (hook does not re-run), assert the same after a
+   restart. **Gate branches** (recorded, not assumed) — outcomes stated
+   **per surface**:
+   (a) config hook re-runs on reload (any config-object lifecycle —
+   fresh/clone/mutated; the value-shape rule handles all three) → MCP
+   reconciliation (inject/refresh/remove) is automatic on reload; README
+   says so for MCP.
+   (b) config hook does not re-run on reload → MCP reconciliation is
+   restart-only; README says "restart after login or rotation" for MCP.
+   (c) chat loader recreates on reload → chat credential rotation is
+   automatic; else restart-only for chat. Each surface (MCP, chat, models)
+   is documented independently — "restart" is never claimed wholesale.
+   No branch blocks the release; the spike result selects the branches.
    (i) **chat-loader reload**: does the instance reload recreate
    the provider/loader (fresh chat `apiKey` from the new auth-store entry)
    or keep the load-time snapshot? (Covered by gate branch (c) above.)
@@ -499,9 +525,11 @@ Ordered stages (detailed task breakdown goes in the implementation plan
 document, per writing-plans):
 
 1. Compatibility spike (above) — version lock + the verifications.
-   1.5. **Spike decision record**: write the gate-branch outcomes into the
-   README draft and the acceptance checklist (reload vs restart-only), and
-   adjust scope before any production code.
+   1.5. **Spike decision record**: write the gate-branch outcomes into every
+   lifecycle statement — the spec's reload/reconciliation claims, the
+   README draft, the acceptance checklist, and the implementation tasks —
+   and make the selected branch's integration tests a prerequisite for
+   production code.
 2. Repo scaffold: `package.json` (see below), `tsconfig.json`, vitest config,
    `.gitignore` (incl. `node_modules/`), `kata init`, CI workflows.
 3. `src/lunaroute.ts` pure helpers + `tests/lunaroute.test.ts`.
@@ -517,7 +545,12 @@ document, per writing-plans):
    or re-login to refresh); restart with no key → no injection; no config
    file ever gains the key or an `mcp.lunaroute` entry.
 9. README (install, connect, env vars, troubleshooting incl. credential
-   removal) + manual smoke checklist run against staging.
+   removal and auth.json recovery) + manual smoke checklist run against
+   staging. The README carries a short **"MCP entry management"** section
+   making the exact-shape collision behavior prominent: a hand-written
+   `mcp.lunaroute` matching the plugin's shape has its header values
+   refreshed by the plugin; to keep a custom entry, diverge its shape
+   (e.g. `enabled: false` or an extra header).
 10. Release: npm Trusted Publisher entry for `@lunaroute/opencode-extension`,
    tag-driven publish (copy `publish.yml` from `lunaroute-pi-extension`).
 
