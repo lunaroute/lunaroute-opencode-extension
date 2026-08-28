@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 5 — after fourth roborev design review)
+Date: 2026-08-28 (rev 6 — after fifth review; config.update persistence verified from OpenCode source)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -152,37 +152,33 @@ provider stub use the same resolved value.
   gateway is ours — validation never trusts the source.
 - capabilities: only `=== true` counts as true (non-boolean ⇒ false)
 
-Skipped entries always emit a `client.app.log` warn; "silent" refers only to
-user-facing UX (no crash, no error toast). An authenticated catalog where
-**every** entry is skipped emits one summarized warn ("N invalid entries,
-all skipped") — distinct from the logged-out case, which emits the single
-info line "Run /connect to start using LunaRoute" and nothing else.
+Skipped entries emit exactly **one warn per skipped entry** (id + reason,
+never the entry payload); when every entry in an authenticated catalog was
+skipped, one additional summary warn is emitted ("N invalid entries, all
+skipped"). "Silent" refers only to user-facing UX (no crash, no error
+toast). The logged-out case emits the single info line "Run /connect to
+start using LunaRoute" and nothing else.
 
 ### MCP (mcp.ts)
 
-**Ownership rule.** `mcp.lunaroute` is **user-owned** if (a) it existed in
-the config object at `config`-hook entry (before this plugin injected
-anything, captured once per process), or (b) at any post-login decision
-point the current live entry exists and does not match the managed-entry
-comparison contract (below). Everything else is **plugin-managed** and
-freely replaced.
+**Injection is config-hook-only** — never via `client.config.update`.
+Verified from OpenCode source: the update path (`POST /config` →
+`Config.Service.update`) **deep-merges and persists to
+`<instance dir>/config.json`** — sending MCP headers through it would write
+the `lr_` key to a plaintext config file. The config hook, by contrast,
+mutates the in-memory live config for the session and is never written back
+by OpenCode. So MCP exists exactly when OpenCode loads config with a valid
+key present: injected at startup, refreshed on instance reload, gone when
+the key is gone.
 
-**Ownership comparison contract.** The match compares exactly: `type`,
-`url`, `oauth`, `enabled`, and the **set of header names** (not values — the
-key value legitimately rotates through our own injection). All match →
-still plugin-managed (whoever last set the key value, the entry is
-functionally ours and is refreshed with the current key). Any divergence →
-user takeover: the entry is user-owned and never touched again this
-process. OpenCode-side normalization (key order, added fields) does not
-affect the comparison — it is field-by-field on the named set only.
+**Ownership rule (simple).** `mcp.lunaroute` is user-owned iff it exists in
+the config object at `config`-hook entry (before this plugin injects
+anything). Since the plugin never persists an MCP entry, a pre-existing
+entry can only be user-authored — the plugin never touches it (log one info
+line when a key exists but the entry is user-owned). Everything else is
+plugin-managed for the session.
 
-**Deletion/restoration semantics.** A deleted plugin-managed entry is not
-proactively re-created mid-session; it is re-injected on the next login or
-restart (when a validated key exists). A user who wants it *permanently*
-gone diverges it instead — e.g. set `enabled: false` — which makes it
-user-owned and untouchable. This is the documented escape hatch.
-
-`config` hook (and post-login update) injects:
+The hook injects:
 
 ```json
 {
@@ -194,12 +190,21 @@ user-owned and untouchable. This is the documented escape hatch.
 }
 ```
 
-only when a key is stored **and** `mcp.lunaroute` is not user-owned. Key
-resolution at config time (auth resolution is unreliable inside the hook —
-documented community pattern): `OPENCODE_AUTH_CONTENT` env blob first
-(OpenCode injects it into subprocesses), then
+only when a validated key is stored **and** `mcp.lunaroute` is not
+user-owned. Key resolution at config time (auth resolution is unreliable
+inside the hook — documented community pattern): `OPENCODE_AUTH_CONTENT`
+env blob first (OpenCode injects it into subprocesses), then
 `${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json`, entry `lunaroute` →
 api `key` / oauth `access`. No key → no injection, silent.
+
+**Consequence, documented**: after a first login or key rotation, MCP tools
+appear without a manual restart only if OpenCode re-runs the config hook on
+instance reload (`update` marks the instance for disposal — reload behavior
+verified in the spike). If the hook does not re-run, a restart is required
+for MCP. Pi achieves live registration via pi-mcp-adapter's in-process
+event; OpenCode's plugin API has no equivalent — a platform gap. A future
+OAuth flow on the hosted MCP server would remove the key from config
+entirely and is the recommended long-term fix (follow-up, backend side).
 
 ### Config-hook orchestration (index.ts)
 
@@ -210,10 +215,11 @@ prevent the other):
 
 1. `injectProviderStub(cfg)` (from `models.ts`) — provider defaults, never
    overwriting user-set fields.
-2. `injectMcp(cfg, ownership)` (from `mcp.ts`) — plugin-managed MCP entry only.
+2. `injectMcp(cfg)` (from `mcp.ts`) — plugin-managed MCP entry only
+   (ownership decided inside, from hook-entry state).
 
-The post-login refresh reuses the same two functions plus
-`applyDefaultModel` so startup and post-login follow one merge contract.
+There is no post-login config write of provider or MCP state — the only
+post-login mutation is the `model` auto-pick (see Post-login refresh).
 
 ### Attribution (index.ts)
 
@@ -229,64 +235,64 @@ The post-login refresh reuses the same two functions plus
 
 ### Post-login best-effort refresh
 
-After either login method succeeds (closure over the plugin `client`):
+After either login method succeeds (closure over the plugin `client`), the
+**only** mutation is the default-model auto-pick:
 
 1. Read current config via `client.config.get()`.
-2. Re-inject `mcp.lunaroute` **iff (not user-owned) AND (a validated key is
-   available)** — the full predicate, stated once: injection happens exactly
-   when the entry is not user-owned and the stored credential passes
-   header-value validation. On a fresh first login the entry is absent → not
-   user-owned → injected and becomes plugin-managed. A malformed credential
-   → skip (same as logged-out). If user-owned, skip and log one info line
-   ("user-defined mcp.lunaroute in effect; rotate by editing it or removing
-   it").
-3. If `config.model` is unset, fetch the catalog with the new key and set
-   `model: "lunaroute/<first-mapped-model>"` — deterministic rule: the
-   lexicographically smallest `id` among **successfully mapped** entries
-   (stable even if gateway response order changes; if the mapped list is
-   empty, skip the auto-pick entirely).
-4. `client.config.update({ config })` (read-modify-write).
+2. If `config.model` is unset, fetch the catalog with the new key and call
+   `client.config.update({ config: { model:
+   "lunaroute/<first-mapped-model>" } })` — payload contains **exactly the
+   `model` key, never the full config, never `mcp`** (update deep-merges
+   and persists to the instance `config.json` — persisting a default model
+   is desirable and matches Pi's `setModel` save; persisting anything
+   secret is forbidden). Deterministic rule: lexicographically smallest
+   `id` among **successfully mapped** entries; empty mapped list → skip.
+3. MCP is NOT written here (see MCP section). If OpenCode re-runs the
+   config hook on the instance reload that `update` triggers, MCP refreshes
+   with the fresh key automatically — verified in the spike; otherwise a
+   restart is required (documented behavior).
 
-Every step is caught and logged; failures fall back to restart semantics (the
-config hook re-injects MCP at startup; the provider hook re-serves models on
-the next `/models` open). Model availability itself does not depend on this.
+Every step is caught and logged. Model availability itself never depends
+on this — the provider hook serves models on the next `/models` open.
 
 ## Persistence & secret handling
 
 - **The only persistent credential is OpenCode's own auth store**
   (`~/.local/share/opencode/auth.json`), written by OpenCode when `/connect`
   succeeds. The plugin never writes keys anywhere else.
-- **`config` hook mutations and `client.config.update` mutate the live,
-  in-session config only** — they do not write `opencode.json`. Evidence:
-  both community precedents (`opencode-dynamic-custom-providers`' `/reload-models`
-  "updates the live config", `opencode-models-discovery` "enhanced configuration
-  is used for the current session") rely on exactly this. The compatibility
-  spike (below) re-verifies it directly: run a config update, then diff
-  `opencode.json` — must be untouched.
-- MCP headers carrying the key therefore exist only in memory, never in user
-  files.
-- **Key rotation**: re-running `/connect` replaces the auth-store entry; the
-  post-login refresh replaces the **plugin-managed** MCP entry with the new
-  key (ownership rule). **Removal**: delete the `lunaroute` entry from
+- **Config hook mutations are in-memory only** — the hook mutates the live
+  config object for the session; OpenCode writes config files only on
+  explicit `update` calls, and the plugin never sends MCP/key data through
+  `update`. **`client.config.update` is NOT memory-only** (corrected from
+  community docs by reading the source): `POST /config` →
+  `Config.Service.update` deep-merges the payload and **persists to
+  `<instance dir>/config.json`**, then marks the instance for disposal
+  (reload). The plugin's only `update` payload is `{ model }` — non-secret,
+  persisted deliberately (default-model preference, Pi `setModel` parity).
+  The spike re-verifies both properties on the pinned version.
+- MCP headers carrying the key exist only in the in-memory live config,
+  never in any file.
+- **Key rotation**: re-running `/connect` replaces the auth-store entry; MCP
+  picks up the new key on instance reload (if the config hook re-runs —
+  spike-verified) or restart. **Removal**: delete the `lunaroute` entry from
   auth.json — documented in the README troubleshooting section (OpenCode has
   no `/disconnect` command as of this writing; if one ships, use it).
   **Mid-session removal caveat**: there is no auth-change event in the plugin
   API, so a live session's plugin-managed MCP entry retains the removed key
-  until restart (chat fails 401 immediately since the loader re-reads the
-  auth store per provider load). Documented limitation, verified in stage 8.
+  until restart/reload (chat fails 401 immediately since the loader re-reads
+  the auth store per provider load). Documented limitation, verified in
+  stage 8.
 - **Logs**: never log the key or `Authorization` header values; error paths
-  stringify fetch failures with the URL and status only.
+  stringify fetch failures with the URL and status only; warn lines for
+  skipped catalog entries include counts and ids, never entry payloads.
 - **Credential/header value validation**: before a stored key is placed into
   MCP headers it must be a non-empty printable-ASCII string (no control
   characters) of sane length (≤ 512); a malformed auth-store entry is treated
   as no key (skip injection, one warn log).
-- **Config read-modify-write**: the post-login `config.get()` → mutate →
-  `config.update()` sequence is best-effort; a concurrent update by OpenCode
-  or another plugin can interleave (last-writer-wins — the plugin API offers
-  no config locking). Mitigations: the get→update window is one small
-  mutation, and every injection is reconciled from scratch at the next
-  restart via the config hook. No retry loop by design — a lost update heals
-  on restart. This is a documented platform limitation, not a solved problem.
+- **Update concurrency**: the only update is a single-key `{ model }`
+  deep-merge; a concurrent change to `model` by the user is last-writer-wins
+  on one non-secret preference and self-heals via `/models`. No config
+  locking exists in the plugin API; no retry loop by design.
 
 ## Data flows
 
@@ -295,7 +301,9 @@ the next `/models` open). Model availability itself does not depend on this.
 - **`/connect` → browser**: authorize() starts loopback + opens
   `/device-auth/opencode?port&state&challenge` → user approves →
   `127.0.0.1:port/callback?code&state` → exchange → key stored by OpenCode in
-  auth.json → post-login refresh (MCP + optional default model).
+  auth.json → optional default-model pick (`{ model }` update) → MCP on
+  instance reload (if the spike confirms the config hook re-runs) or
+  restart.
 - **`/models` open**: provider hook `models()` fetches catalog with stored key.
 - **Chat request**: loader-injected `apiKey` authenticates; `chat.headers` adds
   attribution; gateway sees `harness_code: "opencode"`, session id, and key
@@ -316,28 +324,28 @@ the next `/models` open). Model availability itself does not depend on this.
   fetch error → `{}`), config-hook stub injection (preserves user
   overrides), catalog validation table (fractional / beyond-bound /
   negative limits fall back; large-but-plausible accepted; non-string ids
-  and duplicates skipped; fully-invalid catalog → one summarized warn),
+  and duplicates skipped; fully-invalid catalog → per-entry warns plus one
+  summary line),
   deterministic default-model rule (lexicographic first; empty → no
   auto-pick), in-flight fetch dedup.
 - `mcp.test.ts` — injection predicate (not user-owned AND validated key);
-  ownership lifecycle: fresh first-login injects, rotation replaces the
-  plugin-managed entry, user modification (compared-field divergence) →
-  takeover and never touched again, deleted managed entry not re-created
-  mid-session but re-injected on next login, unchanged managed entry
-  survives a config read/write cycle (no false takeover from
-  normalization); credential validation (control chars, oversize → skip);
+  hook-entry ownership: pre-existing entry never touched (info log), absent
+  entry injected, injected entry re-injected on the next hook run with the
+  current key; credential validation (control chars, oversize → skip);
   auth.json reading (tmp dir, XDG override, `OPENCODE_AUTH_CONTENT`
-  precedence).
+  precedence); the post-login update payload contains exactly `{ model }`
+  (never mcp, never keys).
 - `index.test.ts` — config-hook orchestrator order + per-contributor error
   isolation; `chat.headers` only mutates when the provider is `lunaroute`.
 
 ### Manual smoke checklist (against staging, README dev section)
 
 1. `/connect` browser flow completes; key lands in auth.json only; running it
-   twice in a row (re-login) replaces the credential and **MCP requests carry
-   the new key and the current session attribution** (verified on the staging
-   MCP server: `LUNAROUTE-API-KEY` + `lunaroute-agent` + session id — checked
-   after first login and again after re-login).
+   twice in a row (re-login) replaces the credential, and after a restart (or
+   instance reload, per spike result) **MCP requests carry the new key and
+   the current session attribution** (verified on the staging MCP server:
+   `LUNAROUTE-API-KEY` + `lunaroute-agent` + session id — checked after
+   first login and again after re-login).
 2. `/models` shows LunaRoute models with correct names; selecting one and
    chatting works; gateway logs show the attribution triple.
 3. Cancelling the browser (never approving) → auth fails after 3 minutes,
@@ -349,8 +357,10 @@ the next `/models` open). Model availability itself does not depend on this.
    line, no errors.
 6. Install from the **packed tarball** (`npm pack` output) into a real
    OpenCode, not just a repo checkout — proves the package loads from npm.
-7. `opencode.json` is byte-identical after login + post-login refresh
-   (persistence guarantee).
+7. After login + post-login refresh: no config file contains the key or an
+   `mcp.lunaroute` entry written by the plugin; the instance `config.json`
+   may gain only the `model` field (auto-pick); global `opencode.json`
+   untouched.
 8. User pre-set `provider.lunaroute.options.baseURL` or a user-defined
    `mcp.lunaroute` survive a restart untouched — and a re-login while a
    user-defined `mcp.lunaroute` exists leaves it untouched (info log shown).
@@ -391,7 +401,14 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
    from the URL, `curl` the `/callback?code=&state=` on the loopback server
    (simulating the browser redirect; `LUNAROUTE_API_URL` pointed at the fake
    exchange), assert the auth result resolves — plus a cancellation case
-   (no callback → 3-minute timeout, listener released).
+   (no callback → 3-minute timeout, listener released); (g) **config
+   persistence semantics**: after the model auto-pick `update`, the
+   instance `config.json` contains only the `model` addition (no key, no
+   mcp), and a config-hook injection leaves all files untouched; (h)
+   **instance reload**: after `update` (which marks the instance for
+   disposal), does the config hook re-run with the fresh key (MCP refresh
+   without restart)? Record the answer — it decides whether the README
+   says "restart required" or "automatic" for MCP after login.
    The fixture is throwaway; production code starts at stage 2.
 
 Results are recorded here (`engines.opencode`, peer dependency floor) before
@@ -412,10 +429,12 @@ document, per writing-plans):
 5. `src/models.ts` provider/catalog + `tests/models.test.ts`.
 6. `src/mcp.ts` MCP injection + `tests/mcp.test.ts`.
 7. `src/index.ts` hook wiring (config-hook orchestrator) + `tests/index.test.ts`.
-8. **Secret lifecycle verification**: re-login replaces key + plugin-managed
-   MCP headers; auth-store entry removed mid-session → live MCP keeps stale
-   key until restart (documented limitation + README note: remove the entry
-   and restart, or re-login to refresh); restart with no key → no injection.
+8. **Secret lifecycle verification**: re-login replaces key; MCP headers
+   refresh on reload/restart with the new key; auth-store entry removed
+   mid-session → live MCP keeps stale key until restart (documented
+   limitation + README note: remove the entry and restart, or re-login to
+   refresh); restart with no key → no injection; no config file ever gains
+   the key or an `mcp.lunaroute` entry.
 9. README (install, connect, env vars, troubleshooting incl. credential
    removal) + manual smoke checklist run against staging.
 10. Release: npm Trusted Publisher entry for `@lunaroute/opencode-extension`,
