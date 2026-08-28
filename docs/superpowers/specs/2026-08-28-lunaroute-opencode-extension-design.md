@@ -249,7 +249,9 @@ writes, so it is always freshest after a login or rotation. **No
 process-start snapshot). **File policy**: symlinks are followed, with no
 containment or permission requirements beyond readability (OpenCode reads
 the file plainly; so do we — dotfile-manager symlinks are legitimate).
-Exactly one read, one warn on failure, **no retry**. The resolution is
+Exactly one read, **no retry**; read failures emit at most one warn,
+and only when a managed-shape entry was retained (per the normative
+indeterminate logging rule). The resolution is
 **tri-state**, because absence of evidence is not evidence of logout:
 
 - **valid key** — file readable, `lunaroute` entry present, credential
