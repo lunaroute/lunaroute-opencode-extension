@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 13 — after twelfth review; injectedCredentials set, complete tri-state)
+Date: 2026-08-28 (rev 14 — after thirteenth review; store-path-keyed fingerprint state)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -204,24 +204,29 @@ long as its shape diverges**; restoring the managed shape re-enters
 management (stateless recognition has no persistent opt-out). (An extra
 header is *not* an opt-out: it would be forwarded to the MCP server.)
 
-**Injection lifecycle — the complete decision matrix.** `injectedCredentials`
-is the **set** of credentials this process has successfully written into
-managed entries (added on every injection/refresh, never cleared by
-reads; per process — auth.json is a single shared store, and the set
-correctly covers every config generation this process reconciled, so an
-older config still carrying a previously-injected credential is cleaned
-up too):
+**Injection lifecycle — the complete decision matrix.** State is kept as
+`Map<authStorePath, Set<fingerprint>>` — keyed by the **resolved auth-store
+path** (not process-global: correct even if the host ever varies the data
+dir, and isolated between test contexts), holding **SHA-256 fingerprints**
+of credentials this process successfully wrote into managed entries (never
+the raw secrets; bounded to the most recent 8 per store — older
+fingerprints fall back to the unknown-credential path, which is
+fail-safe). Added on every injection/refresh; never cleared by reads; dies
+with the process (no cross-process persistence by design). The set covers
+every config generation reconciled against that store, so an older config
+still carrying a previously-injected credential is cleaned up too:
 
 | resolution | entry at hook entry | action |
 |---|---|---|
-| valid key | absent | inject (adds to `injectedCredentials`) |
-| valid key | ours | replace all header values (adds to set) |
+| valid key | absent | inject (adds fingerprint) |
+| valid key | ours | replace all header values (adds fingerprint) |
 | valid key | user-owned | leave untouched (one info log) |
 | confirmed logged out | absent | nothing |
-| confirmed logged out | ours, credential ∈ `injectedCredentials` | **remove** |
+| confirmed logged out | ours, fingerprint ∈ set | **remove** |
 | confirmed logged out | ours, other credential | leave untouched (one info log) |
 | confirmed logged out | user-owned | leave untouched |
-| **indeterminate** (any) | any | **leave everything untouched** + one redacted warn (fail-safe) |
+| **indeterminate** | managed-shape entry present | **retain everything** + one redacted warn |
+| **indeterminate** | nothing to retain | silent no-op (the warn fires only when something was retained — a fresh install must not warn) |
 
 **Key resolution (single source of truth, tri-state).** Auth resolution is
 unreliable inside the hook (documented community pattern), so the plugin
@@ -248,11 +253,14 @@ Exactly one read, one warn on failure, **no retry**. The resolution is
   missing file is classified indeterminate whenever any managed state
   could exist, and nothing-to-do otherwise);
 - **indeterminate** — file present but the `lunaroute` record is
-  present-but-invalid (missing field, non-string/empty credential, control
-  characters, oversize), file unparseable, unreadable, or missing while
-  managed state exists: absence of a clean read is NOT evidence of logout
-  → **leave all MCP state untouched** + one redacted warn (fail-safe; the
-  next hook run with a clean read reconciles).
+  present-but-invalid (missing field; `null`, array, or primitive value;
+  non-string/empty credential, control characters, oversize), file
+  unparseable, unreadable, or **missing** — a missing file is NOT a durable
+  logout signal (OpenCode may replace files non-atomically during writes,
+  and deleting the whole store is not the documented logout path): the
+  result is **indeterminate** — retain any managed-shape entry (one
+  redacted warn, only when something was retained) and otherwise a silent
+  no-op. The next hook run with a clean read reconciles.
 
 Spike item (h) proves the chain end-to-end: re-login → auth.json updated →
 next config-hook run injects the new key.
@@ -497,7 +505,9 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
 
 1. Resolve the earliest OpenCode release containing every hook we use
    (provider, auth, config, chat.headers) from the plugin package history.
-2. Verify `client.config.update` is live-only (acceptance criterion 7).
+2. Verify `client.config.update` is live-only (acceptance criterion 7)
+   and that the host resolves a single global auth store (observed
+   cardinality documented; state is store-path-keyed regardless).
 3. **Behavioral proof against the selected version**: build a **disposable
    minimal fixture package** in a scratch directory (not the repo scaffold —
    a hello-plugin exercising exactly the provider/auth/config/chat.headers
