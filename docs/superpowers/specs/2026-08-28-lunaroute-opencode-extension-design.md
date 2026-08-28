@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 14 — after thirteenth review; store-path-keyed fingerprint state)
+Date: 2026-08-28 (rev 15 — after fourteenth review; bounded-guarantee stated, store-key canonicalization)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -430,33 +430,38 @@ on this — the provider hook serves models on the next `/models` open.
   summary line),
   deterministic default-model rule (lexicographic first; empty → no
   auto-pick), in-flight fetch dedup.
-- `mcp.test.ts` — the full injection lifecycle matrix in the exact tri-state
-terminology: **valid key** + absent → inject; + ours → replace all header
-values; + user-owned → untouched (info log). **Confirmed logged out**
-(readable store, entry absent) + absent → nothing; + ours with credential
-∈ `injectedCredentials` → **removed**; + ours with other credential →
-untouched (info log); + user-owned → untouched. **Indeterminate** + any
-entry → everything retained + one redacted warn. **Residual collision
-(asserted, documented)**: hand-authored exact shape with a credential ∈
-`injectedCredentials` → removed on confirmed logout. **Multi-generation
-rotation**: inject A into config gen 1, rotate to B into gen 2 (set = {A,
-B}), confirmed logout, hook invoked with each generation → both managed
-entries removed. Value-shape recognition: fresh, cloned, and mutated
-config objects classify identically; shape divergences (enabled toggled,
-different url, extra header, duplicate logical header names) →
-user-owned; case variations of our header names normalize to ours.
-**Auth-file states through a previously injected config**: valid →
-refresh; readable-with-entry-absent → removed; record present-but-invalid
-(missing field, non-string, empty, control chars, oversize) → retained
-(indeterminate); file unparseable/unreadable → retained; file **missing**
-→ retained (indeterminate); restored → refresh. Credential validation
-applies on the inject path (control chars, oversize → indeterminate,
-retain). The post-login update payload contains exactly `{ model }`
-(never mcp, never keys); the auto-pick re-read guard (model set between
-steps → skip). Symlink threat model: a user-controlled symlink is local
-configuration — anyone able to point auth.json elsewhere can already read
-the store directly; the read credential only ever goes to the fixed
-LunaRoute endpoints.
+- `mcp.test.ts`, split into independently reviewable groups:
+  - **auth resolver**: tri-state classification (valid /
+    confirmed-logged-out / indeterminate) including record-shape boundaries
+    (`null`, array, primitive, missing field, non-string/empty/
+    control-char/oversize credential → present-but-invalid → indeterminate);
+    missing file → indeterminate (retained-entry warn; silent no-op when
+    nothing to retain); symlink followed; single read, no retry.
+  - **ownership/reconciliation**: the full matrix (each row, in the
+    current terminology — fingerprint set, tri-state resolution);
+    value-shape recognition (fresh, cloned, mutated config objects
+    classify identically; divergences — enabled toggled, different url,
+    extra header, duplicate logical header names → user-owned; case
+    variants of our header names normalize to ours); residual collision
+    asserted (hand-authored exact shape with fingerprint ∈ set → removed
+    on confirmed logout).
+  - **multi-generation + isolation + eviction**: inject A into config
+    gen 1, rotate to B into gen 2, confirmed logout → both generations
+    removed; **eviction bound**: nine distinct rotations then logout,
+    with an older generation carrying the first credential → retained +
+    info log (the documented bounded-guarantee boundary, asserted);
+    **store-key isolation**: fingerprints injected against store 1 never
+    classify entries against store 2 (two store paths, logout in one, the
+    other untouched), including symlinked and delete+rename-replaced
+    stores resolving to the same key.
+  - **hook integration**: post-login update payload exactly `{ model }`
+    (never mcp, never keys); auto-pick re-read guard; **redaction
+    assertions**: no credential material — current, historical, or from
+    malformed records — appears in any log, warn, or error object
+    (fingerprints only); symlink threat model: a user-controlled symlink
+    is local configuration — anyone able to point auth.json elsewhere can
+    already read the store directly; the read credential only ever goes
+    to the fixed LunaRoute endpoints.
 - `index.test.ts` — config-hook orchestrator order + per-contributor error
   isolation; `chat.headers` only mutates when the provider is `lunaroute`.
 
