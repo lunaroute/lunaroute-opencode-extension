@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 2 — after roborev design review)
+Date: 2026-08-28 (rev 3 — after second roborev design review)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -119,7 +119,8 @@ provider stub use the same resolved value.
   `GET ${routingUrl}/models` (Bearer + attribution headers, 5s timeout, single
   attempt — no retry policy; the next `/models` open retries naturally) →
   map catalog to `Record<string, ModelV2>`. The hook may be called
-  concurrently by OpenCode; the fetch is stateless, so this is safe.
+  concurrently by OpenCode; a single in-flight fetch promise is shared
+  (memoized until it settles) so concurrent calls don't duplicate requests.
 
 **Catalog mapping** (`GatewayModelObject` → OpenCode model):
 
@@ -138,12 +139,30 @@ provider stub use the same resolved value.
 - `api: { id, url: routingUrl, npm: "@ai-sdk/openai-compatible" }`
 - `status: "active"`
 
-**Malformed catalog handling**: entries without an `id`, duplicate ids
-(first wins, rest skipped + logged), or non-object entries are skipped and
-logged via `client.app.log` (warn) — never throw. An empty or fully-malformed
-catalog yields an empty model map (silent).
+**Malformed catalog handling** — per-field coercion/validation rules:
+
+- entry not an object, or `id` not a non-empty string → skip + log warn
+- duplicate `id` → first wins, later ones skipped + logged
+- `display_name` not a string → fall back to `id`
+- limits: `Number.isFinite(x) && x > 0` else the conservative default
+  (128000 / 4096) — negative, NaN, or string values never pass through
+- capabilities: only `=== true` counts as true (non-boolean ⇒ false)
+
+Skipped entries always emit a `client.app.log` warn; "silent" refers only to
+user-facing UX (no crash, no error toast). An authenticated catalog where
+**every** entry is skipped emits one summarized warn ("N invalid entries,
+all skipped") — distinct from the logged-out case, which emits the single
+info line "Run /connect to start using LunaRoute" and nothing else.
 
 ### MCP (mcp.ts)
+
+**Ownership rule.** `cfg.mcp.lunaroute` is **user-owned** if it exists in
+the config object *before* this plugin injects anything (captured once at
+`config`-hook entry into a module-level flag). User-owned entries are never
+read or modified. Everything the plugin injects is **plugin-managed**, and
+plugin-managed entries are freely replaced (re-login/rotation). This resolves
+the otherwise-ambiguous "inject only if absent" rotation case: after our own
+injection the entry is present, but we know we own it.
 
 `config` hook (and post-login update) injects:
 
@@ -157,13 +176,26 @@ catalog yields an empty model map (silent).
 }
 ```
 
-only when a key is stored, **and only when `cfg.mcp.lunaroute` does not
-already exist** (a user-defined `mcp.lunaroute` entry is respected
-untouched). Key resolution at config time (auth resolution is unreliable
-inside the hook — documented community pattern): `OPENCODE_AUTH_CONTENT` env
-blob first (OpenCode injects it into subprocesses), then
+only when a key is stored **and** `mcp.lunaroute` is not user-owned. Key
+resolution at config time (auth resolution is unreliable inside the hook —
+documented community pattern): `OPENCODE_AUTH_CONTENT` env blob first
+(OpenCode injects it into subprocesses), then
 `${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json`, entry `lunaroute` →
 api `key` / oauth `access`. No key → no injection, silent.
+
+### Config-hook orchestration (index.ts)
+
+OpenCode exposes **one** `config` hook per plugin. `index.ts` owns it and
+composes the two contributors in a fixed order, each as a pure function over
+the config object, each individually try/caught (a failure in one must not
+prevent the other):
+
+1. `injectProviderStub(cfg)` (from `models.ts`) — provider defaults, never
+   overwriting user-set fields.
+2. `injectMcp(cfg, ownership)` (from `mcp.ts`) — plugin-managed MCP entry only.
+
+The post-login refresh reuses the same two functions plus
+`applyDefaultModel` so startup and post-login follow one merge contract.
 
 ### Attribution (index.ts)
 
@@ -182,10 +214,14 @@ api `key` / oauth `access`. No key → no injection, silent.
 After either login method succeeds (closure over the plugin `client`):
 
 1. Read current config via `client.config.get()`.
-2. Inject `mcp.lunaroute` if absent (needs the fresh key).
+2. Re-inject `mcp.lunaroute` **only if plugin-managed** (ownership rule above)
+   — this is what makes rotation work: replacing our own entry with the fresh
+   key. If user-owned, skip and log one info line ("user-defined mcp.lunaroute
+   in effect; rotate by editing it or removing it").
 3. If `config.model` is unset, fetch the catalog with the new key and set
-   `model: "lunaroute/<first-catalog-model>"` (first-login auto-pick; never
-   overrides an existing choice).
+   `model: "lunaroute/<first-mapped-model>"` — deterministic rule: the first
+   entry of the **successfully mapped** list, in gateway response order; if
+   the mapped list is empty, skip the auto-pick entirely.
 4. `client.config.update({ config })` (read-modify-write).
 
 Every step is caught and logged; failures fall back to restart semantics (the
@@ -207,10 +243,14 @@ the next `/models` open). Model availability itself does not depend on this.
 - MCP headers carrying the key therefore exist only in memory, never in user
   files.
 - **Key rotation**: re-running `/connect` replaces the auth-store entry; the
-  post-login refresh re-injects MCP headers with the new key (or the next
-  restart does). **Removal**: delete the `lunaroute` entry from auth.json —
-  documented in the README troubleshooting section (OpenCode has no
-  `/disconnect` command as of this writing; if one ships, use it).
+  post-login refresh replaces the **plugin-managed** MCP entry with the new
+  key (ownership rule). **Removal**: delete the `lunaroute` entry from
+  auth.json — documented in the README troubleshooting section (OpenCode has
+  no `/disconnect` command as of this writing; if one ships, use it).
+  **Mid-session removal caveat**: there is no auth-change event in the plugin
+  API, so a live session's plugin-managed MCP entry retains the removed key
+  until restart (chat fails 401 immediately since the loader re-reads the
+  auth store per provider load). Documented limitation, verified in stage 8.
 - **Logs**: never log the key or `Authorization` header values; error paths
   stringify fetch failures with the URL and status only.
 
@@ -233,8 +273,10 @@ Manual smoke checklist against staging (README dev section), each item
 pass/fail:
 
 1. `/connect` browser flow completes; key lands in auth.json only; running it
-   twice in a row (re-login) replaces the credential and MCP picks up the new
-   key without a stale-header error.
+   twice in a row (re-login) replaces the credential and **MCP requests carry
+   the new key and the current session attribution** (verified on the staging
+   MCP server: `LUNAROUTE-API-KEY` + `lunaroute-agent` + session id — checked
+   after first login and again after re-login).
 2. `/models` shows LunaRoute models with correct names; selecting one and
    chatting works; gateway logs show the attribution triple.
 3. Cancelling the browser (never approving) → auth fails after 3 minutes,
@@ -249,7 +291,8 @@ pass/fail:
 7. `opencode.json` is byte-identical after login + post-login refresh
    (persistence guarantee).
 8. User pre-set `provider.lunaroute.options.baseURL` or a user-defined
-   `mcp.lunaroute` survive a restart untouched.
+   `mcp.lunaroute` survive a restart untouched — and a re-login while a
+   user-defined `mcp.lunaroute` exists leaves it untouched (info log shown).
 
 ## Availability policy (documented divergence from Pi)
 
@@ -270,8 +313,14 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
 1. Resolve the earliest OpenCode release containing every hook we use
    (provider, auth, config, chat.headers) from the plugin package history.
 2. Verify `client.config.update` is live-only (acceptance criterion 7).
-3. Verify a raw-TS npm package with default-export Plugin loads from a
-   packed tarball (acceptance criterion 6).
+3. **Behavioral proof against the selected version**: a local fake gateway
+   (plain HTTP server serving one `/models` entry) + the packed tarball plugin
+   loaded into a real OpenCode run — verify (a) paste-auth validation against
+   the fake gateway succeeds, (b) the provider hook serves the fake model,
+   (c) the config-hook orchestrator contributes provider stub **and** MCP
+   entry together, (d) the mapped `ModelV2` (with conservative limit
+   defaults) is accepted and token budgeting behaves, (e) `opencode.json`
+   untouched after `config.update`.
 
 Results are recorded here (`engines.opencode`, peer dependency floor) before
 the scaffold lands. Core dynamic model discovery
@@ -290,11 +339,19 @@ document, per writing-plans):
 4. `src/login.ts` auth flow + `tests/login.test.ts`.
 5. `src/models.ts` provider/catalog + `tests/models.test.ts`.
 6. `src/mcp.ts` MCP injection + `tests/mcp.test.ts`.
-7. `src/index.ts` hook wiring + `tests/index.test.ts`.
-8. README (install, connect, env vars, troubleshooting incl. credential
+7. `src/index.ts` hook wiring (config-hook orchestrator) + `tests/index.test.ts`.
+8. **Secret lifecycle verification**: re-login replaces key + plugin-managed
+   MCP headers; auth-store entry removed mid-session → live MCP keeps stale
+   key until restart (documented limitation + README note: remove the entry
+   and restart, or re-login to refresh); restart with no key → no injection.
+9. README (install, connect, env vars, troubleshooting incl. credential
    removal) + manual smoke checklist run against staging.
-9. Release: npm Trusted Publisher entry for `@lunaroute/opencode-extension`,
+10. Release: npm Trusted Publisher entry for `@lunaroute/opencode-extension`,
    tag-driven publish (copy `publish.yml` from `lunaroute-pi-extension`).
+
+Follow-up milestone (post-v1): automated packed-tarball integration smoke in
+CI — the version-sensitive boundary (package load + hook wiring) currently
+relies on the manual staging gate.
 
 ## Repo bootstrap details
 
