@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 15 — after fourteenth review; bounded-guarantee stated, store-key canonicalization)
+Date: 2026-08-28 (rev 16 — after fifteenth review; normative logging rule, lexical store key)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -205,16 +205,25 @@ management (stateless recognition has no persistent opt-out). (An extra
 header is *not* an opt-out: it would be forwarded to the MCP server.)
 
 **Injection lifecycle — the complete decision matrix.** State is kept as
-`Map<authStorePath, Set<fingerprint>>` — keyed by the **resolved auth-store
-path** (not process-global: correct even if the host ever varies the data
-dir, and isolated between test contexts), holding **SHA-256 fingerprints**
-of credentials this process successfully wrote into managed entries (never
-the raw secrets; bounded to the most recent 8 per store — older
-fingerprints fall back to the unknown-credential path, which is
-fail-safe). Added on every injection/refresh; never cleared by reads; dies
-with the process (no cross-process persistence by design). The set covers
-every config generation reconciled against that store, so an older config
-still carrying a previously-injected credential is cleaned up too:
+`Map<storeKey, Set<fingerprint>>` — `storeKey` is the **lexically resolved
+auth-store path, always** (no `realpath`: identity is the path, not the
+inode target — stable across present/absent/replacement transitions; two
+lexical paths pointing at one file are two isolated keys, harmless and
+fail-safe), holding **SHA-256 fingerprints** (UTF-8 credential bytes →
+hex digest) of credentials this process successfully wrote into managed
+entries (never the raw secrets). The set keeps the **most recent 8
+distinct credentials per store** — FIFO by write, re-injecting an
+existing credential refreshes its position; logout cleanup is therefore
+**guaranteed for the most recent 8 distinct credentials per store**, and
+older generations fall back to the unknown-credential path (retained +
+info log), which is fail-safe — a deliberate bounded-memory trade-off,
+not an accident. Comparison is ordinary set membership: the fingerprint
+gates local config cleanup, it is not an auth boundary, and no secret
+material is exposed by comparison timing. State dies with the process
+(no cross-process persistence by design). Within the bound, the set
+covers every config generation reconciled against that store, so an
+older config still carrying a recently-injected credential is cleaned
+up too:
 
 | resolution | entry at hook entry | action |
 |---|---|---|
@@ -250,8 +259,8 @@ Exactly one read, one warn on failure, **no retry**. The resolution is
   the entry gone* is the only durable logout signal; a **missing file** is
   NOT — OpenCode may replace files non-atomically during writes, and
   deletion of the whole store is not the documented logout path — so a
-  missing file is classified indeterminate whenever any managed state
-  could exist, and nothing-to-do otherwise);
+  missing file always resolves to **indeterminate**, whose logging rule
+  makes the no-retention case a silent no-op);
 - **indeterminate** — file present but the `lunaroute` record is
   present-but-invalid (missing field; `null`, array, or primitive value;
   non-string/empty credential, control characters, oversize), file
@@ -447,13 +456,17 @@ on this — the provider hook serves models on the next `/models` open.
     on confirmed logout).
   - **multi-generation + isolation + eviction**: inject A into config
     gen 1, rotate to B into gen 2, confirmed logout → both generations
-    removed; **eviction bound**: nine distinct rotations then logout,
-    with an older generation carrying the first credential → retained +
-    info log (the documented bounded-guarantee boundary, asserted);
-    **store-key isolation**: fingerprints injected against store 1 never
-    classify entries against store 2 (two store paths, logout in one, the
-    other untouched), including symlinked and delete+rename-replaced
-    stores resolving to the same key.
+    removed; **eviction bound, both sides**: nine distinct rotations then
+    logout — older generations carrying credentials 2–9 → removed, the
+    generation carrying credential 1 → retained + info log (positive and
+    negative sides asserted); **re-injection ordering**: re-injecting an
+    existing credential refreshes its eviction position (oldest-by-write
+    FIFO asserted via a targeted sequence); **store-key lifecycle**:
+    same logical store through inject (present) → missing interval →
+    restored → reconcile/logout — path identity stable throughout
+    (lexical key, no realpath); **store-key isolation**: fingerprints
+    injected against store 1 never classify entries against store 2
+    (two lexical paths, logout in one, the other untouched).
   - **hook integration**: post-login update payload exactly `{ model }`
     (never mcp, never keys); auto-pick re-read guard; **redaction
     assertions**: no credential material — current, historical, or from
