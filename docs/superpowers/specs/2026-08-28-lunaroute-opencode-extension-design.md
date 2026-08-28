@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 4 — after third roborev design review)
+Date: 2026-08-28 (rev 5 — after fourth roborev design review)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -144,10 +144,12 @@ provider stub use the same resolved value.
 - entry not an object, or `id` not a non-empty string → skip + log warn
 - duplicate `id` → first wins, later ones skipped + logged
 - `display_name` not a string → fall back to `id`
-- limits: `Number.isSafeInteger(x) && x > 0` → use as-is (no clamping — the
-  catalog is our own backend; oversized values are cosmetic, and clamping
-  would mask a bad catalog); anything else (negative, fractional, NaN,
-  strings, beyond safe-integer) → conservative default (128000 / 4096)
+- limits: `Number.isSafeInteger(x) && x > 0` and within plausible bounds
+  (`context ≤ 100_000_000`, `output ≤ 10_000_000` — ≥50× any real model) →
+  use as-is; anything else (negative, fractional, NaN, strings, beyond
+  safe-integer or the plausible bound) → conservative default (128000 / 4096).
+  Catalog values are treated as **untrusted remote input** even though the
+  gateway is ours — validation never trusts the source.
 - capabilities: only `=== true` counts as true (non-boolean ⇒ false)
 
 Skipped entries always emit a `client.app.log` warn; "silent" refers only to
@@ -161,14 +163,24 @@ info line "Run /connect to start using LunaRoute" and nothing else.
 **Ownership rule.** `mcp.lunaroute` is **user-owned** if (a) it existed in
 the config object at `config`-hook entry (before this plugin injected
 anything, captured once per process), or (b) at any post-login decision
-point the current live entry exists and does not deep-match the entry this
-plugin last injected in this process (someone else wrote or modified it —
-this also lets a user take over a previously plugin-managed entry mid-session:
-edit it and we stop touching it). Everything else is **plugin-managed** and
-freely replaced. Concretely: post-login injects/refreshes iff the entry is
-not user-owned — a fresh first login (entry absent → not user-owned) injects
-and the entry becomes plugin-managed; rotation replaces it; a user-defined
-entry is never touched.
+point the current live entry exists and does not match the managed-entry
+comparison contract (below). Everything else is **plugin-managed** and
+freely replaced.
+
+**Ownership comparison contract.** The match compares exactly: `type`,
+`url`, `oauth`, `enabled`, and the **set of header names** (not values — the
+key value legitimately rotates through our own injection). All match →
+still plugin-managed (whoever last set the key value, the entry is
+functionally ours and is refreshed with the current key). Any divergence →
+user takeover: the entry is user-owned and never touched again this
+process. OpenCode-side normalization (key order, added fields) does not
+affect the comparison — it is field-by-field on the named set only.
+
+**Deletion/restoration semantics.** A deleted plugin-managed entry is not
+proactively re-created mid-session; it is re-injected on the next login or
+restart (when a validated key exists). A user who wants it *permanently*
+gone diverges it instead — e.g. set `enabled: false` — which makes it
+user-owned and untouchable. This is the documented escape hatch.
 
 `config` hook (and post-login update) injects:
 
@@ -220,15 +232,19 @@ The post-login refresh reuses the same two functions plus
 After either login method succeeds (closure over the plugin `client`):
 
 1. Read current config via `client.config.get()`.
-2. Re-inject `mcp.lunaroute` **iff not user-owned** (ownership rule above —
-   note a first login on a fresh install: the entry is absent, therefore not
-   user-owned, therefore injected and marked plugin-managed). If user-owned,
-   skip and log one info line ("user-defined mcp.lunaroute in effect; rotate
-   by editing it or removing it").
+2. Re-inject `mcp.lunaroute` **iff (not user-owned) AND (a validated key is
+   available)** — the full predicate, stated once: injection happens exactly
+   when the entry is not user-owned and the stored credential passes
+   header-value validation. On a fresh first login the entry is absent → not
+   user-owned → injected and becomes plugin-managed. A malformed credential
+   → skip (same as logged-out). If user-owned, skip and log one info line
+   ("user-defined mcp.lunaroute in effect; rotate by editing it or removing
+   it").
 3. If `config.model` is unset, fetch the catalog with the new key and set
-   `model: "lunaroute/<first-mapped-model>"` — deterministic rule: the first
-   entry of the **successfully mapped** list, in gateway response order; if
-   the mapped list is empty, skip the auto-pick entirely.
+   `model: "lunaroute/<first-mapped-model>"` — deterministic rule: the
+   lexicographically smallest `id` among **successfully mapped** entries
+   (stable even if gateway response order changes; if the mapped list is
+   empty, skip the auto-pick entirely).
 4. `client.config.update({ config })` (read-modify-write).
 
 Every step is caught and logged; failures fall back to restart semantics (the
@@ -266,8 +282,11 @@ the next `/models` open). Model availability itself does not depend on this.
   as no key (skip injection, one warn log).
 - **Config read-modify-write**: the post-login `config.get()` → mutate →
   `config.update()` sequence is best-effort; a concurrent update by OpenCode
-  or another plugin can interleave. We do not lock or retry — a lost update
-  means MCP injection lands on the next restart. No retry loop by design.
+  or another plugin can interleave (last-writer-wins — the plugin API offers
+  no config locking). Mitigations: the get→update window is one small
+  mutation, and every injection is reconciled from scratch at the next
+  restart via the config hook. No retry loop by design — a lost update heals
+  on restart. This is a documented platform limitation, not a solved problem.
 
 ## Data flows
 
@@ -284,8 +303,35 @@ the next `/models` open). Model availability itself does not depend on this.
 
 ## Acceptance criteria
 
-Manual smoke checklist against staging (README dev section), each item
-pass/fail:
+### Unit tests (vitest, one file per module — mirrors the pi-extension suite)
+
+- `lunaroute.test.ts` — PKCE (hex sha256), device-auth URL construction
+  (incl. `/device-auth/opencode` path), callback parsing, catalog mapping
+  table (reasoning/vision/variants/limits/defaults), attribution headers,
+  session-id fallback, env resolvers, base-URL precedence.
+- `login.test.ts` — loopback round-trip, state mismatch, timeout, exchange
+  happy/error paths, paste-method validation (mocked fetch), double-callback
+  ignored.
+- `models.test.ts` — provider hook (no key → `{}`, key → mapped models,
+  fetch error → `{}`), config-hook stub injection (preserves user
+  overrides), catalog validation table (fractional / beyond-bound /
+  negative limits fall back; large-but-plausible accepted; non-string ids
+  and duplicates skipped; fully-invalid catalog → one summarized warn),
+  deterministic default-model rule (lexicographic first; empty → no
+  auto-pick), in-flight fetch dedup.
+- `mcp.test.ts` — injection predicate (not user-owned AND validated key);
+  ownership lifecycle: fresh first-login injects, rotation replaces the
+  plugin-managed entry, user modification (compared-field divergence) →
+  takeover and never touched again, deleted managed entry not re-created
+  mid-session but re-injected on next login, unchanged managed entry
+  survives a config read/write cycle (no false takeover from
+  normalization); credential validation (control chars, oversize → skip);
+  auth.json reading (tmp dir, XDG override, `OPENCODE_AUTH_CONTENT`
+  precedence).
+- `index.test.ts` — config-hook orchestrator order + per-contributor error
+  isolation; `chat.headers` only mutates when the provider is `lunaroute`.
+
+### Manual smoke checklist (against staging, README dev section)
 
 1. `/connect` browser flow completes; key lands in auth.json only; running it
    twice in a row (re-login) replaces the credential and **MCP requests carry
@@ -337,8 +383,15 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
    gateway succeeds, (b) the provider hook serves the fake model, (c) a
    config-hook orchestrator contributes provider stub **and** MCP entry
    together, including the fresh-first-login injection path, (d) the mapped
-   `ModelV2` (with conservative limit defaults) is accepted and token
-   budgeting behaves, (e) `opencode.json` untouched after `config.update`.
+   `ModelV2` is accepted and token budgeting behaves — fixture catalog
+   includes a large-but-plausible limit (accepted), a fractional limit and a
+   beyond-bound limit (both fall back to defaults), (e) `opencode.json`
+   untouched after `config.update`, (f) the **browser flow contract,
+   headless**: run `authorize()`, parse the returned loopback port + state
+   from the URL, `curl` the `/callback?code=&state=` on the loopback server
+   (simulating the browser redirect; `LUNAROUTE_API_URL` pointed at the fake
+   exchange), assert the auth result resolves — plus a cancellation case
+   (no callback → 3-minute timeout, listener released).
    The fixture is throwaway; production code starts at stage 2.
 
 Results are recorded here (`engines.opencode`, peer dependency floor) before
