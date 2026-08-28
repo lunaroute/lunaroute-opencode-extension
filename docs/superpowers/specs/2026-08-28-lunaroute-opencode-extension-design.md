@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 9 — after eighth review; complete injection lifecycle matrix)
+Date: 2026-08-28 (rev 10 — after ninth review; value-shape recognition)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -171,25 +171,24 @@ by OpenCode. So MCP is injected exactly when a valid key exists at
 config-hook time: at startup, refreshed on instance reload, absent when no
 key exists.
 
-**Ownership rule (in-process provenance).** The plugin keeps, per config
-object (a `WeakMap` keyed by the config object itself — scoped to that
-config's lifecycle, garbage-collected with it, immune to cross-instance
-contamination), the last entry it injected. `mcp.lunaroute` is user-owned
-iff it exists at `config`-hook entry **and does not deep-match that
-process-and-config's last injected entry**. Since the plugin never persists
-an MCP entry, a pre-existing entry can only be user-authored or our own
-prior injection surviving a same-process hook re-run — the deep match
-distinguishes exactly those two, and correctly handles both reload
-semantics (fresh config from files: entry absent; mutated in-memory
-config: our entry matches). A user-edited entry (any divergence) →
-user-owned, never touched again this process (log one info line when a
-key exists but the entry is user-owned). On a fresh process there is no
-prior injection, so any pre-existing entry is user-authored by
-construction.
+**Ownership rule (value-shape recognition — lifecycle-agnostic).** The
+plugin recognizes its own entry **by value, not by tracked identity**: an
+entry is **ours** iff `type === "remote"` && `url` equals the resolved MCP
+URL && `oauth === false` && `enabled === true` && the set of header names
+equals ours (`LUNAROUTE-API-KEY` + the attribution triple) — the key
+*value* is ignored (it legitimately rotates). This works identically
+whether a reload hands the hook a fresh config, a clone, or the same
+mutated object — no per-object provenance state exists to go stale.
+Anything else is **user-owned** and never touched. Documented trade-off: a
+user who hand-writes our exact shape (same URL, same headers) has their
+key value refreshed by us when a valid key exists — functionally the same
+server and credential scheme, so this is a refresh, not a takeover; the
+way to opt out is any shape divergence (e.g. `enabled: false`, a
+different URL, or an extra header), which makes the entry user-owned
+permanently.
 
 **Injection lifecycle — the complete decision matrix** (key = validated
-credential from auth.json; ours = deep-matches our last injection for this
-config):
+credential from auth.json; ours = matches the value shape above):
 
 | key | entry at hook entry | action |
 |---|---|---|
@@ -332,13 +331,18 @@ on this — the provider hook serves models on the next `/models` open.
   server-side revocation is what actually cuts access. Documented limitation,
   verified in
   stage 8.
-- **Logs**: never log the key or `Authorization` header values; error paths
-  stringify fetch failures with the URL and status only — including warns, caught exceptions, and debug logs; warn lines for
+- **Logs**: never log the key or `Authorization` header values — including
+  warns, caught exceptions, and debug logs — and never serialize the parsed
+  auth record or the injected MCP object in diagnostics; error paths
+  stringify fetch failures with the URL and status only; warn lines for
   skipped catalog entries include counts and ids, never entry payloads.
 - **Credential/header value validation**: before a stored key is placed into
   MCP headers it must be a non-empty printable-ASCII string (no control
   characters) of sane length (≤ 512); a malformed auth-store entry is treated
-  as no key (skip injection, one warn log).
+  as no key (skip injection, one warn log). README troubleshooting includes
+  recovery guidance for an unreadable/corrupt auth.json: the plugin logs one
+  secret-free warn and behaves as logged out; re-running `/connect` rewrites
+  the store and restores the session.
 - **Update concurrency**: the only update is a single-key `{ model }`
   deep-merge; a concurrent change to `model` by the user is last-writer-wins
   on one non-secret preference and self-heals via `/models`. No config
@@ -379,14 +383,15 @@ on this — the provider hook serves models on the next `/models` open.
   deterministic default-model rule (lexicographic first; empty → no
   auto-pick), in-flight fetch dedup.
 - `mcp.test.ts` — the full injection lifecycle matrix (six cells): key+absent
-  → inject; key+ours → replace with current key; key+user-owned → untouched
-  (info log); no-key+absent → nothing; **no-key+ours → entry removed**;
-  no-key+user-owned → untouched. Auth-file policy (missing file → no
-  credential; corrupt/unexpected shape → no credential + one warn; symlink
-  followed; single read, no retry). In-process provenance is per-config
-  (WeakMap) — two config objects don't cross-contaminate. The post-login
-  update payload contains exactly `{ model }` (never mcp, never keys);
-  the auto-pick re-read guard (model set between steps → skip). the post-login update payload contains
+  → inject; key+ours (value-shape match, key value ignored) → replace with
+  current key; key+user-owned → untouched (info log); no-key+absent →
+  nothing; **no-key+ours → entry removed**; no-key+user-owned → untouched.
+  Value-shape recognition cases: fresh config, cloned config, mutated
+  config — all classify identically; shape divergences (enabled toggled,
+  different url, extra header) → user-owned. Auth-file policy (missing
+  file → no credential; corrupt/unexpected shape → no credential + one
+  warn; symlink followed; single read, no retry). Credential validation
+  (control chars, oversize → skip). the post-login update payload contains
   exactly `{ model }` (never mcp, never keys); the auto-pick re-read guard
   (model set between steps → skip).
 - `index.test.ts` — config-hook orchestrator order + per-contributor error
@@ -466,12 +471,21 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
    provenance rule — begin from a plugin-injected entry and assert the
    rotated key lands)? And on that reload: does a **user-defined
    `mcp.lunaroute` survive untouched** while an absent entry gets the
-   rotated key? (i) **chat-loader reload**: does the instance reload recreate
+   rotated key? (j) **removal e2e on the real reload path**: inject a key,
+   remove it from auth.json, trigger the supported reload, and assert the
+   plugin-managed entry is gone while a user-owned entry survives.
+   **Gate branches** (recorded, not assumed): (a) config hook re-runs on
+   reload (any config-object lifecycle — fresh/clone/mutated; the
+   value-shape rule handles all three) → reload support ships, README
+   says "automatic after login/rotation"; (b) config hook does not re-run
+   on reload → restart-only: README documents "restart after login or
+   rotation", nothing else changes, release proceeds; (c) chat loader
+   recreates on reload → rotation is automatic for chat too; else
+   restart-only documented. No branch blocks the release; the spike result
+   selects the branch.
+   (i) **chat-loader reload**: does the instance reload recreate
    the provider/loader (fresh chat `apiKey` from the new auth-store entry)
-   or keep the load-time snapshot? Record the answer — the README's
-   rotation instructions depend on it ("restart required" vs
-   "automatic"). All spike outcomes are release gates; unresolved items
-   narrow v1 scope rather than ship on assumptions.
+   or keep the load-time snapshot? (Covered by gate branch (c) above.)
    The fixture is throwaway; production code starts at stage 2.
 
 Results are recorded here (`engines.opencode`, peer dependency floor) before
@@ -484,7 +498,10 @@ hook + gateway catalog metadata is strictly richer than its ID-only discovery.
 Ordered stages (detailed task breakdown goes in the implementation plan
 document, per writing-plans):
 
-1. Compatibility spike (above) — version lock + the two verifications.
+1. Compatibility spike (above) — version lock + the verifications.
+   1.5. **Spike decision record**: write the gate-branch outcomes into the
+   README draft and the acceptance checklist (reload vs restart-only), and
+   adjust scope before any production code.
 2. Repo scaffold: `package.json` (see below), `tsconfig.json`, vitest config,
    `.gitignore` (incl. `node_modules/`), `kata init`, CI workflows.
 3. `src/lunaroute.ts` pure helpers + `tests/lunaroute.test.ts`.
