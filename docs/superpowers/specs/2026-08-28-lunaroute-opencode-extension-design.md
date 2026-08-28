@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 11 — after tenth review; guarded removal, per-surface gates)
+Date: 2026-08-28 (rev 12 — after eleventh review; tri-state resolution, lastInjectedKey state machine)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -177,7 +177,10 @@ plugin recognizes its own entry **by value, not by tracked identity**: an
 entry is **ours** iff `type === "remote"` && `url` equals the resolved MCP
 URL && `oauth === false` && `enabled === true` && the set of header names
 equals ours (`LUNAROUTE-API-KEY` + the attribution triple — compared
-case-insensitively, per HTTP header semantics). This works identically
+case-insensitively, per HTTP header semantics; if the entry contains
+duplicate logical names, e.g. both `LUNAROUTE-API-KEY` and
+`lunaroute-api-key`, the shape is malformed → user-owned, left untouched —
+deterministic, no canonicalization). This works identically
 whether a reload hands the hook a fresh config, a clone, or the same
 mutated object — no per-object provenance state exists to go stale.
 Anything else is **user-owned while its shape diverges** — restoring the
@@ -186,53 +189,64 @@ memory of past ownership). All header *values* in a managed entry are
 plugin-managed and rewritten on refresh (the attribution triple as well as
 the key).
 
-**Exact-shape collisions (documented, deliberate):** a user who hand-writes
-our exact shape gets a *refresh*, never a surprise removal — the no-key
-removal below fires only on credentials the plugin itself placed:
+**Exact-shape collisions (documented, deliberate).** A user who hand-writes
+our exact shape gets a *refresh* — header values rewritten with the current
+key and attribution (functionally the same server and credential scheme).
+The **one unavoidable residual**: an entry that matches our shape *and*
+carries the exact credential the plugin last injected is indistinguishable
+from the plugin's own entry — including a hand-authored copy — and is
+treated as ours (refreshed when a key exists, removed on confirmed
+logout). Structural matching cannot establish who placed an identical
+value; this residual is accepted and asserted in tests, not promised away.
+Opt-out: set `enabled: false` (the standard OpenCode way to keep an entry
+but stop using it) or diverge the URL — both make the entry user-owned
+while diverged. (An extra header is *not* recommended as an opt-out: it
+would be forwarded to the MCP server.)
 
-- key present + ours → refresh: header values rewritten with the current
-  key and attribution (functionally the same server and credential scheme;
-  a refresh, not a takeover).
-- opt-out → any shape divergence (e.g. `enabled: false`, a different URL,
-  an extra header) makes the entry user-owned while diverged.
-- key absent + ours: the entry is removed **only if its `LUNAROUTE-API-KEY`
-  value equals the last credential this process read from auth.json**
-  (module state updated every hook run — i.e., we clean up only the
-  credential we placed and just observed disappearing). A managed-shape
-  entry carrying any other credential is left untouched with one info
-  log ("matches plugin shape but carries an unknown credential").
-  Hand-authored entries survive logged-out states.
+**Injection lifecycle — the complete decision matrix** (`lastInjectedKey`
+= the credential this process last successfully wrote into a managed
+entry — set only on injection/refresh, never cleared by reads, per
+process; auth.json is a single shared store so cross-instance sharing is
+correct):
 
-**Injection lifecycle — the complete decision matrix** (key = validated
-credential from auth.json; ours = matches the value shape above):
-
-| key | entry at hook entry | action |
+| resolution | entry at hook entry | action |
 |---|---|---|
-| present | absent | inject |
-| present | ours | replace all header values with current key + attribution |
-| present | user-owned | leave untouched (one info log) |
-| absent | absent | nothing |
-| absent | ours, credential = last seen | **remove** (stale managed credential cleanup) |
-| absent | ours, unknown credential | leave untouched (one info log) |
-| absent | user-owned | leave untouched |
+| valid key | absent | inject (sets `lastInjectedKey`) |
+| valid key | ours | replace all header values (updates `lastInjectedKey`) |
+| valid key | user-owned | leave untouched (one info log) |
+| confirmed logged out | absent | nothing |
+| confirmed logged out | ours, credential = `lastInjectedKey` | **remove** |
+| confirmed logged out | ours, any other credential | leave untouched (one info log) |
+| confirmed logged out | user-owned | leave untouched |
+| **indeterminate** (any) | any | **leave everything untouched** + one redacted warn (fail-safe) |
 
-**Key resolution (single source of truth).** Auth resolution is unreliable
-inside the hook (documented community pattern), so the plugin resolves the
-key itself: read **auth.json only** — resolved via OpenCode's own data-dir
-logic for the platform (**release gate**: the spike must record either the
-supported SDK/source-derived resolution for Linux + macOS, or v1 narrows
-its supported platforms accordingly) — entry `lunaroute` → api `key` /
-oauth `access`. That file is what `/connect` writes, so it is always
-freshest after a login or rotation. **No `OPENCODE_AUTH_CONTENT` fallback**:
-the env blob may be a stale process-start snapshot, and a missing or
-unparseable auth.json means *logged out*. **File policy**: symlinks are
-followed (dotfile managers legitimately symlink auth.json; OpenCode reads
-it plainly, so do we); the parsed record must be an object with a string
-`key`/`access` for `lunaroute`, else no credential; exactly one read, one
-warn on failure, **no retry** (a transient race with OpenCode's write
-resolves on the next hook run). Spike item (h) proves the chain
-end-to-end: re-login → auth.json updated → next config-hook run injects
-the new key.
+**Key resolution (single source of truth, tri-state).** Auth resolution is
+unreliable inside the hook (documented community pattern), so the plugin
+resolves the key itself: read **auth.json only** — resolved via OpenCode's
+own data-dir logic for the platform (**release gate**: the spike must
+record either the supported SDK/source-derived resolution for Linux +
+macOS, or v1 narrows its supported platforms accordingly) — entry
+`lunaroute` → api `key` / oauth `access`. That file is what `/connect`
+writes, so it is always freshest after a login or rotation. **No
+`OPENCODE_AUTH_CONTENT` fallback** (the env blob may be a stale
+process-start snapshot). **File policy**: symlinks are followed, with no
+containment or permission requirements beyond readability (OpenCode reads
+the file plainly; so do we — dotfile-manager symlinks are legitimate).
+Exactly one read, one warn on failure, **no retry**. The resolution is
+**tri-state**, because absence of evidence is not evidence of logout:
+
+- **valid key** — file readable, `lunaroute` entry present, credential
+  shape-valid → act (inject/refresh per matrix);
+- **confirmed logged out** — file readable and the `lunaroute` entry is
+  absent (or the file itself is absent — the same signal OpenCode treats
+  as logged-out) → removal path per matrix;
+- **indeterminate** — file present but unparseable, or unreadable
+  (permissions): a transient mid-write race or corruption is NOT evidence
+  of logout → **leave all MCP state untouched** + one redacted warn
+  (fail-safe; the next hook run with a clean read reconciles).
+
+Spike item (h) proves the chain end-to-end: re-login → auth.json updated →
+next config-hook run injects the new key.
 
 **Removal semantics (stated once, consistently):** per the matrix above —
 a key removed from auth.json takes effect at the **next config-hook run**
@@ -404,15 +418,17 @@ on this — the provider hook serves models on the next `/models` open.
   replace all header values; key+user-owned → untouched (info log);
   no-key+absent → nothing; no-key+ours+last-seen credential → **removed**;
   no-key+ours+unknown credential → untouched (info log); no-key+
-  user-owned → untouched. **Exact-shape collision cases**: hand-authored
-  exact-shape entry with a valid key → header values refreshed; with no
-  key and its own credential → left untouched. Value-shape recognition
+  user-owned → untouched. **Residual collision (asserted, documented)**:
+  hand-authored exact shape whose credential equals `lastInjectedKey` →
+  treated as ours, removed on confirmed logout. Value-shape recognition
   cases: fresh, cloned, and mutated config objects classify identically;
   shape divergences (enabled toggled, different url, extra header,
-  header-name case variations) → user-owned. Auth-file policy (missing
-  file → no credential; corrupt/unexpected shape → no credential + one
-  warn; symlink followed; single read, no retry). Credential validation
-  (control chars, oversize → skip). the post-login update payload contains
+  duplicate logical header names) → user-owned; case variations of our
+  header names normalize to ours. **Auth-file state transitions through a
+  previously injected config**: valid → refresh; file/entry missing
+  (confirmed out) → managed entry removed; unparseable/unreadable
+  (indeterminate) → managed entry **retained** + redacted warn; restored
+  → refresh. Credential validation (control chars, oversize → skip). the post-login update payload contains
   exactly `{ model }` (never mcp, never keys); the auto-pick re-read guard
   (model set between steps → skip).
 - `index.test.ts` — config-hook orchestrator order + per-contributor error
@@ -525,11 +541,12 @@ Ordered stages (detailed task breakdown goes in the implementation plan
 document, per writing-plans):
 
 1. Compatibility spike (above) — version lock + the verifications.
-   1.5. **Spike decision record**: write the gate-branch outcomes into every
-   lifecycle statement — the spec's reload/reconciliation claims, the
-   README draft, the acceptance checklist, and the implementation tasks —
-   and make the selected branch's integration tests a prerequisite for
-   production code.
+   1.5. **Spike decision record** (committed artifact, not paperwork): the
+   decision record plus a minimal host-test harness land as a commit; the
+   selected branch's integration test must pass before the MCP production
+   stage (stage 6) proceeds. Every lifecycle statement — spec reload claims,
+   README draft, acceptance checklist, implementation tasks — is updated
+   to the selected branches.
 2. Repo scaffold: `package.json` (see below), `tsconfig.json`, vitest config,
    `.gitignore` (incl. `node_modules/`), `kata init`, CI workflows.
 3. `src/lunaroute.ts` pure helpers + `tests/lunaroute.test.ts`.
