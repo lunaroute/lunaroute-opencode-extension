@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 8 — after seventh review; env fallback removed, in-process provenance)
+Date: 2026-08-28 (rev 9 — after eighth review; complete injection lifecycle matrix)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -171,40 +171,61 @@ by OpenCode. So MCP is injected exactly when a valid key exists at
 config-hook time: at startup, refreshed on instance reload, absent when no
 key exists.
 
-**Ownership rule (in-process provenance).** `mcp.lunaroute` is user-owned
-iff it exists at `config`-hook entry **and does not deep-match the entry
-this process last injected** (module state). Since the plugin never
-persists an MCP entry, a pre-existing entry can only be user-authored or
-our own prior injection surviving a same-process hook re-run — the deep
-match against our own last injection distinguishes exactly those two, and
-correctly handles both possible reload semantics (fresh config from files:
-entry absent → inject; mutated in-memory config: our entry matches →
-refresh with the current key). A user-edited entry (any divergence) →
-user-owned, never touched again this process (log one info line when a key
-exists but the entry is user-owned). On a fresh process there is no prior
-injection, so any pre-existing entry is user-authored by construction.
+**Ownership rule (in-process provenance).** The plugin keeps, per config
+object (a `WeakMap` keyed by the config object itself — scoped to that
+config's lifecycle, garbage-collected with it, immune to cross-instance
+contamination), the last entry it injected. `mcp.lunaroute` is user-owned
+iff it exists at `config`-hook entry **and does not deep-match that
+process-and-config's last injected entry**. Since the plugin never persists
+an MCP entry, a pre-existing entry can only be user-authored or our own
+prior injection surviving a same-process hook re-run — the deep match
+distinguishes exactly those two, and correctly handles both reload
+semantics (fresh config from files: entry absent; mutated in-memory
+config: our entry matches). A user-edited entry (any divergence) →
+user-owned, never touched again this process (log one info line when a
+key exists but the entry is user-owned). On a fresh process there is no
+prior injection, so any pre-existing entry is user-authored by
+construction.
+
+**Injection lifecycle — the complete decision matrix** (key = validated
+credential from auth.json; ours = deep-matches our last injection for this
+config):
+
+| key | entry at hook entry | action |
+|---|---|---|
+| present | absent | inject |
+| present | ours | replace with current key |
+| present | user-owned | leave untouched (one info log) |
+| absent | absent | nothing |
+| absent | ours | **remove our entry** (stale managed credential cleanup) |
+| absent | user-owned | leave untouched |
 
 **Key resolution (single source of truth).** Auth resolution is unreliable
 inside the hook (documented community pattern), so the plugin resolves the
 key itself: read **auth.json only** — resolved via OpenCode's own data-dir
-logic for the platform (spike pins the resolution; v1 supports Linux +
-macOS, Windows untested and documented) — entry `lunaroute` → api `key` /
+logic for the platform (**release gate**: the spike must record either the
+supported SDK/source-derived resolution for Linux + macOS, or v1 narrows
+its supported platforms accordingly) — entry `lunaroute` → api `key` /
 oauth `access`. That file is what `/connect` writes, so it is always
 freshest after a login or rotation. **No `OPENCODE_AUTH_CONTENT` fallback**:
 the env blob may be a stale process-start snapshot, and a missing or
-unparseable auth.json means *logged out* — treat as no credential (one warn
-on parse failure), never fall back to an older copy of the secret. Read
-errors of any kind (permissions, partial writes, symlinks) → no credential
-+ one warn. Spike item (h) proves the chain end-to-end: re-login →
-auth.json updated → next config-hook run injects the new key.
+unparseable auth.json means *logged out*. **File policy**: symlinks are
+followed (dotfile managers legitimately symlink auth.json; OpenCode reads
+it plainly, so do we); the parsed record must be an object with a string
+`key`/`access` for `lunaroute`, else no credential; exactly one read, one
+warn on failure, **no retry** (a transient race with OpenCode's write
+resolves on the next hook run). Spike item (h) proves the chain
+end-to-end: re-login → auth.json updated → next config-hook run injects
+the new key.
 
-**Removal semantics (stated once, consistently):** the entry is injected
-when a valid key exists at config-hook time; a key removed from auth.json
-takes effect at the **next config-hook run** (instance reload or restart) —
-until then the in-memory MCP header **and the loader-injected chat
-`apiKey`** (also a load-time snapshot, not per-request) both keep the old
-key; server-side revocation is what actually cuts access. No mid-session
-eager removal is attempted — the plugin has no config write path for MCP.
+**Removal semantics (stated once, consistently):** per the matrix above —
+a key removed from auth.json takes effect at the **next config-hook run**
+(instance reload or restart), where our own entry is actively removed; a
+user-owned entry survives regardless. Until that run, the in-memory MCP
+header **and the loader-injected chat `apiKey`** (also a load-time
+snapshot, not per-request) both keep the old key; server-side revocation
+is what actually cuts access. No mid-session eager removal — the plugin
+has no config write path for MCP outside the hook.
 
 The hook injects, only when a validated key is stored **and** `mcp.lunaroute`
 is not user-owned:
@@ -357,15 +378,15 @@ on this — the provider hook serves models on the next `/models` open.
   summary line),
   deterministic default-model rule (lexicographic first; empty → no
   auto-pick), in-flight fetch dedup.
-- `mcp.test.ts` — injection predicate (not user-owned AND validated key);
-  hook-entry ownership: pre-existing entry never touched (info log), absent
-  entry injected, injected entry re-injected on the next hook run with the
-  current key; credential validation (control chars, oversize → skip);
-  auth.json reading (tmp dir, data-dir resolution, missing file →
-  no credential, corrupt file → no credential + one warn); in-process
-  provenance ownership (pre-existing entry never touched; own prior
-  injection deep-matches → refreshed with current key; diverged entry →
-  user-owned, never touched again); the post-login update payload contains
+- `mcp.test.ts` — the full injection lifecycle matrix (six cells): key+absent
+  → inject; key+ours → replace with current key; key+user-owned → untouched
+  (info log); no-key+absent → nothing; **no-key+ours → entry removed**;
+  no-key+user-owned → untouched. Auth-file policy (missing file → no
+  credential; corrupt/unexpected shape → no credential + one warn; symlink
+  followed; single read, no retry). In-process provenance is per-config
+  (WeakMap) — two config objects don't cross-contaminate. The post-login
+  update payload contains exactly `{ model }` (never mcp, never keys);
+  the auto-pick re-read guard (model set between steps → skip). the post-login update payload contains
   exactly `{ model }` (never mcp, never keys); the auto-pick re-read guard
   (model set between steps → skip).
 - `index.test.ts` — config-hook orchestrator order + per-contributor error
@@ -445,9 +466,12 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
    provenance rule — begin from a plugin-injected entry and assert the
    rotated key lands)? And on that reload: does a **user-defined
    `mcp.lunaroute` survive untouched** while an absent entry gets the
-   rotated key? Record the answers — they decide whether the README
-   says "restart required" or "automatic" for MCP after login, and pin
-   the reload-time ownership behavior.
+   rotated key? (i) **chat-loader reload**: does the instance reload recreate
+   the provider/loader (fresh chat `apiKey` from the new auth-store entry)
+   or keep the load-time snapshot? Record the answer — the README's
+   rotation instructions depend on it ("restart required" vs
+   "automatic"). All spike outcomes are release gates; unresolved items
+   narrow v1 scope rather than ship on assumptions.
    The fixture is throwaway; production code starts at stage 2.
 
 Results are recorded here (`engines.opencode`, peer dependency floor) before
