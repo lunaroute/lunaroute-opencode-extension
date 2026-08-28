@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 12 — after eleventh review; tri-state resolution, lastInjectedKey state machine)
+Date: 2026-08-28 (rev 13 — after twelfth review; injectedCredentials set, complete tri-state)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -193,30 +193,33 @@ the key).
 our exact shape gets a *refresh* — header values rewritten with the current
 key and attribution (functionally the same server and credential scheme).
 The **one unavoidable residual**: an entry that matches our shape *and*
-carries the exact credential the plugin last injected is indistinguishable
+carries a credential the plugin previously injected is indistinguishable
 from the plugin's own entry — including a hand-authored copy — and is
 treated as ours (refreshed when a key exists, removed on confirmed
 logout). Structural matching cannot establish who placed an identical
 value; this residual is accepted and asserted in tests, not promised away.
 Opt-out: set `enabled: false` (the standard OpenCode way to keep an entry
-but stop using it) or diverge the URL — both make the entry user-owned
-while diverged. (An extra header is *not* recommended as an opt-out: it
-would be forwarded to the MCP server.)
+but stop using it) or diverge the URL — the entry is then user-owned **as
+long as its shape diverges**; restoring the managed shape re-enters
+management (stateless recognition has no persistent opt-out). (An extra
+header is *not* an opt-out: it would be forwarded to the MCP server.)
 
-**Injection lifecycle — the complete decision matrix** (`lastInjectedKey`
-= the credential this process last successfully wrote into a managed
-entry — set only on injection/refresh, never cleared by reads, per
-process; auth.json is a single shared store so cross-instance sharing is
-correct):
+**Injection lifecycle — the complete decision matrix.** `injectedCredentials`
+is the **set** of credentials this process has successfully written into
+managed entries (added on every injection/refresh, never cleared by
+reads; per process — auth.json is a single shared store, and the set
+correctly covers every config generation this process reconciled, so an
+older config still carrying a previously-injected credential is cleaned
+up too):
 
 | resolution | entry at hook entry | action |
 |---|---|---|
-| valid key | absent | inject (sets `lastInjectedKey`) |
-| valid key | ours | replace all header values (updates `lastInjectedKey`) |
+| valid key | absent | inject (adds to `injectedCredentials`) |
+| valid key | ours | replace all header values (adds to set) |
 | valid key | user-owned | leave untouched (one info log) |
 | confirmed logged out | absent | nothing |
-| confirmed logged out | ours, credential = `lastInjectedKey` | **remove** |
-| confirmed logged out | ours, any other credential | leave untouched (one info log) |
+| confirmed logged out | ours, credential ∈ `injectedCredentials` | **remove** |
+| confirmed logged out | ours, other credential | leave untouched (one info log) |
 | confirmed logged out | user-owned | leave untouched |
 | **indeterminate** (any) | any | **leave everything untouched** + one redacted warn (fail-safe) |
 
@@ -238,12 +241,18 @@ Exactly one read, one warn on failure, **no retry**. The resolution is
 - **valid key** — file readable, `lunaroute` entry present, credential
   shape-valid → act (inject/refresh per matrix);
 - **confirmed logged out** — file readable and the `lunaroute` entry is
-  absent (or the file itself is absent — the same signal OpenCode treats
-  as logged-out) → removal path per matrix;
-- **indeterminate** — file present but unparseable, or unreadable
-  (permissions): a transient mid-write race or corruption is NOT evidence
-  of logout → **leave all MCP state untouched** + one redacted warn
-  (fail-safe; the next hook run with a clean read reconciles).
+  absent → removal path per matrix. (A *readable, well-formed store with
+  the entry gone* is the only durable logout signal; a **missing file** is
+  NOT — OpenCode may replace files non-atomically during writes, and
+  deletion of the whole store is not the documented logout path — so a
+  missing file is classified indeterminate whenever any managed state
+  could exist, and nothing-to-do otherwise);
+- **indeterminate** — file present but the `lunaroute` record is
+  present-but-invalid (missing field, non-string/empty credential, control
+  characters, oversize), file unparseable, unreadable, or missing while
+  managed state exists: absence of a clean read is NOT evidence of logout
+  → **leave all MCP state untouched** + one redacted warn (fail-safe; the
+  next hook run with a clean read reconciles).
 
 Spike item (h) proves the chain end-to-end: re-login → auth.json updated →
 next config-hook run injects the new key.
@@ -413,24 +422,33 @@ on this — the provider hook serves models on the next `/models` open.
   summary line),
   deterministic default-model rule (lexicographic first; empty → no
   auto-pick), in-flight fetch dedup.
-- `mcp.test.ts` — the full injection lifecycle matrix (seven cells): key+
-  absent → inject; key+ours (value-shape match, key value ignored) →
-  replace all header values; key+user-owned → untouched (info log);
-  no-key+absent → nothing; no-key+ours+last-seen credential → **removed**;
-  no-key+ours+unknown credential → untouched (info log); no-key+
-  user-owned → untouched. **Residual collision (asserted, documented)**:
-  hand-authored exact shape whose credential equals `lastInjectedKey` →
-  treated as ours, removed on confirmed logout. Value-shape recognition
-  cases: fresh, cloned, and mutated config objects classify identically;
-  shape divergences (enabled toggled, different url, extra header,
-  duplicate logical header names) → user-owned; case variations of our
-  header names normalize to ours. **Auth-file state transitions through a
-  previously injected config**: valid → refresh; file/entry missing
-  (confirmed out) → managed entry removed; unparseable/unreadable
-  (indeterminate) → managed entry **retained** + redacted warn; restored
-  → refresh. Credential validation (control chars, oversize → skip). the post-login update payload contains
-  exactly `{ model }` (never mcp, never keys); the auto-pick re-read guard
-  (model set between steps → skip).
+- `mcp.test.ts` — the full injection lifecycle matrix in the exact tri-state
+terminology: **valid key** + absent → inject; + ours → replace all header
+values; + user-owned → untouched (info log). **Confirmed logged out**
+(readable store, entry absent) + absent → nothing; + ours with credential
+∈ `injectedCredentials` → **removed**; + ours with other credential →
+untouched (info log); + user-owned → untouched. **Indeterminate** + any
+entry → everything retained + one redacted warn. **Residual collision
+(asserted, documented)**: hand-authored exact shape with a credential ∈
+`injectedCredentials` → removed on confirmed logout. **Multi-generation
+rotation**: inject A into config gen 1, rotate to B into gen 2 (set = {A,
+B}), confirmed logout, hook invoked with each generation → both managed
+entries removed. Value-shape recognition: fresh, cloned, and mutated
+config objects classify identically; shape divergences (enabled toggled,
+different url, extra header, duplicate logical header names) →
+user-owned; case variations of our header names normalize to ours.
+**Auth-file states through a previously injected config**: valid →
+refresh; readable-with-entry-absent → removed; record present-but-invalid
+(missing field, non-string, empty, control chars, oversize) → retained
+(indeterminate); file unparseable/unreadable → retained; file **missing**
+→ retained (indeterminate); restored → refresh. Credential validation
+applies on the inject path (control chars, oversize → indeterminate,
+retain). The post-login update payload contains exactly `{ model }`
+(never mcp, never keys); the auto-pick re-read guard (model set between
+steps → skip). Symlink threat model: a user-controlled symlink is local
+configuration — anyone able to point auth.json elsewhere can already read
+the store directly; the read credential only ever goes to the fixed
+LunaRoute endpoints.
 - `index.test.ts` — config-hook orchestrator order + per-contributor error
   isolation; `chat.headers` only mutates when the provider is `lunaroute`.
 
