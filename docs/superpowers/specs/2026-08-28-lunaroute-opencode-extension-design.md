@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 7 — after sixth review; freshness-first key resolution)
+Date: 2026-08-28 (rev 8 — after seventh review; env fallback removed, in-process provenance)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -171,32 +171,40 @@ by OpenCode. So MCP is injected exactly when a valid key exists at
 config-hook time: at startup, refreshed on instance reload, absent when no
 key exists.
 
-**Ownership rule (simple).** `mcp.lunaroute` is user-owned iff it exists in
-the config object at `config`-hook entry (before this plugin injects
-anything). Since the plugin never persists an MCP entry, a pre-existing
-entry can only be user-authored — the plugin never touches it (log one info
-line when a key exists but the entry is user-owned). Everything else is
-plugin-managed for the session.
+**Ownership rule (in-process provenance).** `mcp.lunaroute` is user-owned
+iff it exists at `config`-hook entry **and does not deep-match the entry
+this process last injected** (module state). Since the plugin never
+persists an MCP entry, a pre-existing entry can only be user-authored or
+our own prior injection surviving a same-process hook re-run — the deep
+match against our own last injection distinguishes exactly those two, and
+correctly handles both possible reload semantics (fresh config from files:
+entry absent → inject; mutated in-memory config: our entry matches →
+refresh with the current key). A user-edited entry (any divergence) →
+user-owned, never touched again this process (log one info line when a key
+exists but the entry is user-owned). On a fresh process there is no prior
+injection, so any pre-existing entry is user-authored by construction.
 
-**Key resolution (freshness-first).** Auth resolution is unreliable inside
-the hook (documented community pattern), so the plugin resolves the key
-itself. **`auth.json` is authoritative** —
-`${XDG_DATA_HOME:-~/.local/share}/opencode/auth.json`, entry `lunaroute` →
-api `key` / oauth `access` — because that is the file `/connect` writes, so
-it is always freshest after a login or rotation. The
-`OPENCODE_AUTH_CONTENT` env blob is consulted **only as a fallback** when
-auth.json is missing or unparseable (the blob may be a process-start
-snapshot and can be stale after re-login — never prefer it). Spike item (h)
-proves the freshness chain end-to-end: re-login → auth.json updated → next
-config-hook run injects the new key. No key → no injection, silent.
+**Key resolution (single source of truth).** Auth resolution is unreliable
+inside the hook (documented community pattern), so the plugin resolves the
+key itself: read **auth.json only** — resolved via OpenCode's own data-dir
+logic for the platform (spike pins the resolution; v1 supports Linux +
+macOS, Windows untested and documented) — entry `lunaroute` → api `key` /
+oauth `access`. That file is what `/connect` writes, so it is always
+freshest after a login or rotation. **No `OPENCODE_AUTH_CONTENT` fallback**:
+the env blob may be a stale process-start snapshot, and a missing or
+unparseable auth.json means *logged out* — treat as no credential (one warn
+on parse failure), never fall back to an older copy of the secret. Read
+errors of any kind (permissions, partial writes, symlinks) → no credential
++ one warn. Spike item (h) proves the chain end-to-end: re-login →
+auth.json updated → next config-hook run injects the new key.
 
 **Removal semantics (stated once, consistently):** the entry is injected
 when a valid key exists at config-hook time; a key removed from auth.json
 takes effect at the **next config-hook run** (instance reload or restart) —
-until then the in-memory MCP header is stale (chat fails 401 immediately
-since the loader re-reads the auth store; MCP keeps working until the old
-key is revoked server-side). No mid-session eager removal is attempted —
-the plugin has no config write path for MCP.
+until then the in-memory MCP header **and the loader-injected chat
+`apiKey`** (also a load-time snapshot, not per-request) both keep the old
+key; server-side revocation is what actually cuts access. No mid-session
+eager removal is attempted — the plugin has no config write path for MCP.
 
 The hook injects, only when a validated key is stored **and** `mcp.lunaroute`
 is not user-owned:
@@ -298,11 +306,13 @@ on this — the provider hook serves models on the next `/models` open.
   no `/disconnect` command as of this writing; if one ships, use it).
   **Mid-session removal caveat**: there is no auth-change event in the plugin
   API, so a live session's plugin-managed MCP entry retains the removed key
-  until restart/reload (chat fails 401 immediately since the loader re-reads
-  the auth store per provider load). Documented limitation, verified in
+  until the next hook/loader run (reload/restart) — both the in-memory MCP
+  header and the loader-injected chat `apiKey` are load-time snapshots;
+  server-side revocation is what actually cuts access. Documented limitation,
+  verified in
   stage 8.
 - **Logs**: never log the key or `Authorization` header values; error paths
-  stringify fetch failures with the URL and status only; warn lines for
+  stringify fetch failures with the URL and status only — including warns, caught exceptions, and debug logs; warn lines for
   skipped catalog entries include counts and ids, never entry payloads.
 - **Credential/header value validation**: before a stored key is placed into
   MCP headers it must be a non-empty printable-ASCII string (no control
@@ -351,9 +361,11 @@ on this — the provider hook serves models on the next `/models` open.
   hook-entry ownership: pre-existing entry never touched (info log), absent
   entry injected, injected entry re-injected on the next hook run with the
   current key; credential validation (control chars, oversize → skip);
-  auth.json reading (tmp dir, XDG override, `OPENCODE_AUTH_CONTENT`
-  precedence — auth.json authoritative, env blob fallback only, stale-env
-  case returns the auth.json key); the post-login update payload contains
+  auth.json reading (tmp dir, data-dir resolution, missing file →
+  no credential, corrupt file → no credential + one warn); in-process
+  provenance ownership (pre-existing entry never touched; own prior
+  injection deep-matches → refreshed with current key; diverged entry →
+  user-owned, never touched again); the post-login update payload contains
   exactly `{ model }` (never mcp, never keys); the auto-pick re-read guard
   (model set between steps → skip).
 - `index.test.ts` — config-hook orchestrator order + per-contributor error
@@ -428,7 +440,10 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
    mcp), and a config-hook injection leaves all files untouched; (h)
    **instance reload**: after `update` (which marks the instance for
    disposal), does the config hook re-run with the fresh key (MCP refresh
-   without restart)? And on that reload: does a **user-defined
+   without restart)? Does it receive a **freshly reconstructed config or
+   the mutated in-memory one** (both must work under the in-process
+   provenance rule — begin from a plugin-injected entry and assert the
+   rotated key lands)? And on that reload: does a **user-defined
    `mcp.lunaroute` survive untouched** while an absent entry gets the
    rotated key? Record the answers — they decide whether the README
    says "restart required" or "automatic" for MCP after login, and pin
