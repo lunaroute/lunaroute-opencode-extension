@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 3 — after second roborev design review)
+Date: 2026-08-28 (rev 4 — after third roborev design review)
 Status: revised per design review findings
 Kata: (created at implementation)
 
@@ -144,8 +144,10 @@ provider stub use the same resolved value.
 - entry not an object, or `id` not a non-empty string → skip + log warn
 - duplicate `id` → first wins, later ones skipped + logged
 - `display_name` not a string → fall back to `id`
-- limits: `Number.isFinite(x) && x > 0` else the conservative default
-  (128000 / 4096) — negative, NaN, or string values never pass through
+- limits: `Number.isSafeInteger(x) && x > 0` → use as-is (no clamping — the
+  catalog is our own backend; oversized values are cosmetic, and clamping
+  would mask a bad catalog); anything else (negative, fractional, NaN,
+  strings, beyond safe-integer) → conservative default (128000 / 4096)
 - capabilities: only `=== true` counts as true (non-boolean ⇒ false)
 
 Skipped entries always emit a `client.app.log` warn; "silent" refers only to
@@ -156,13 +158,17 @@ info line "Run /connect to start using LunaRoute" and nothing else.
 
 ### MCP (mcp.ts)
 
-**Ownership rule.** `cfg.mcp.lunaroute` is **user-owned** if it exists in
-the config object *before* this plugin injects anything (captured once at
-`config`-hook entry into a module-level flag). User-owned entries are never
-read or modified. Everything the plugin injects is **plugin-managed**, and
-plugin-managed entries are freely replaced (re-login/rotation). This resolves
-the otherwise-ambiguous "inject only if absent" rotation case: after our own
-injection the entry is present, but we know we own it.
+**Ownership rule.** `mcp.lunaroute` is **user-owned** if (a) it existed in
+the config object at `config`-hook entry (before this plugin injected
+anything, captured once per process), or (b) at any post-login decision
+point the current live entry exists and does not deep-match the entry this
+plugin last injected in this process (someone else wrote or modified it —
+this also lets a user take over a previously plugin-managed entry mid-session:
+edit it and we stop touching it). Everything else is **plugin-managed** and
+freely replaced. Concretely: post-login injects/refreshes iff the entry is
+not user-owned — a fresh first login (entry absent → not user-owned) injects
+and the entry becomes plugin-managed; rotation replaces it; a user-defined
+entry is never touched.
 
 `config` hook (and post-login update) injects:
 
@@ -214,10 +220,11 @@ The post-login refresh reuses the same two functions plus
 After either login method succeeds (closure over the plugin `client`):
 
 1. Read current config via `client.config.get()`.
-2. Re-inject `mcp.lunaroute` **only if plugin-managed** (ownership rule above)
-   — this is what makes rotation work: replacing our own entry with the fresh
-   key. If user-owned, skip and log one info line ("user-defined mcp.lunaroute
-   in effect; rotate by editing it or removing it").
+2. Re-inject `mcp.lunaroute` **iff not user-owned** (ownership rule above —
+   note a first login on a fresh install: the entry is absent, therefore not
+   user-owned, therefore injected and marked plugin-managed). If user-owned,
+   skip and log one info line ("user-defined mcp.lunaroute in effect; rotate
+   by editing it or removing it").
 3. If `config.model` is unset, fetch the catalog with the new key and set
    `model: "lunaroute/<first-mapped-model>"` — deterministic rule: the first
    entry of the **successfully mapped** list, in gateway response order; if
@@ -253,6 +260,14 @@ the next `/models` open). Model availability itself does not depend on this.
   auth store per provider load). Documented limitation, verified in stage 8.
 - **Logs**: never log the key or `Authorization` header values; error paths
   stringify fetch failures with the URL and status only.
+- **Credential/header value validation**: before a stored key is placed into
+  MCP headers it must be a non-empty printable-ASCII string (no control
+  characters) of sane length (≤ 512); a malformed auth-store entry is treated
+  as no key (skip injection, one warn log).
+- **Config read-modify-write**: the post-login `config.get()` → mutate →
+  `config.update()` sequence is best-effort; a concurrent update by OpenCode
+  or another plugin can interleave. We do not lock or retry — a lost update
+  means MCP injection lands on the next restart. No retry loop by design.
 
 ## Data flows
 
@@ -313,14 +328,18 @@ hooks, and `PluginModule` are present in `@opencode-ai/plugin` 1.17.20
 1. Resolve the earliest OpenCode release containing every hook we use
    (provider, auth, config, chat.headers) from the plugin package history.
 2. Verify `client.config.update` is live-only (acceptance criterion 7).
-3. **Behavioral proof against the selected version**: a local fake gateway
-   (plain HTTP server serving one `/models` entry) + the packed tarball plugin
-   loaded into a real OpenCode run — verify (a) paste-auth validation against
-   the fake gateway succeeds, (b) the provider hook serves the fake model,
-   (c) the config-hook orchestrator contributes provider stub **and** MCP
-   entry together, (d) the mapped `ModelV2` (with conservative limit
-   defaults) is accepted and token budgeting behaves, (e) `opencode.json`
-   untouched after `config.update`.
+3. **Behavioral proof against the selected version**: build a **disposable
+   minimal fixture package** in a scratch directory (not the repo scaffold —
+   a hello-plugin exercising exactly the provider/auth/config/chat.headers
+   hooks we depend on, packed with `npm pack`), plus a local fake gateway
+   (plain HTTP server serving one `/models` entry). Load the fixture into a
+   real OpenCode run and verify: (a) paste-auth validation against the fake
+   gateway succeeds, (b) the provider hook serves the fake model, (c) a
+   config-hook orchestrator contributes provider stub **and** MCP entry
+   together, including the fresh-first-login injection path, (d) the mapped
+   `ModelV2` (with conservative limit defaults) is accepted and token
+   budgeting behaves, (e) `opencode.json` untouched after `config.update`.
+   The fixture is throwaway; production code starts at stage 2.
 
 Results are recorded here (`engines.opencode`, peer dependency floor) before
 the scaffold lands. Core dynamic model discovery
