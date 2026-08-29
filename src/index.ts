@@ -22,7 +22,9 @@ export type PluginLog = (level: "info" | "warn", message: string) => void;
  */
 export type TestClient = {
   config: {
-    get(): Promise<{ data?: { model?: string } }>;
+    // get() may return the wrapped `{ data }` shape or the flat config object
+    // directly — not spike-verified which, so the read is shape-tolerant.
+    get(): Promise<{ data?: { model?: string }; model?: string }>;
     update(body: { config: { model: string } }): Promise<unknown>;
   };
 };
@@ -77,6 +79,10 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaoutePlugin {
     const clientOf = (runtime?: PluginRuntime): TestClient | undefined =>
       runtime?.client ?? deps.client ?? input?.client;
 
+    /** Resolve the current default model from either SDK get() shape (wrapped or flat). */
+    const currentModelOf = (cfg: { data?: { model?: string }; model?: string } | undefined | null): string | undefined =>
+      cfg?.data?.model ?? cfg?.model;
+
     /**
      * Post-login default-model pick. The ONLY config write the plugin ever
      * makes: exactly `{ model }` (never mcp, never keys) — config.update
@@ -88,8 +94,8 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaoutePlugin {
       try {
         const client = clientOf(runtime);
         if (!client) return;
-        const current = await client.config.get();
-        if (current?.data?.model) return;
+        const current = currentModelOf(await client.config.get());
+        if (current) return;
         const catalog = await catalogMemo(key);
         if ("error" in catalog) {
           log("warn", `LunaRoute: post-login catalog fetch failed: ${catalog.error}`);
@@ -98,8 +104,8 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaoutePlugin {
         if (!catalog.models.length) return;
         const id = defaultModelId(catalog.models);
         if (!id) return;
-        const fresh = await client.config.get(); // re-read guard: a concurrent selection wins
-        if (fresh?.data?.model) return;
+        const fresh = currentModelOf(await client.config.get()); // re-read guard: a concurrent selection wins
+        if (fresh) return;
         await client.config.update({ config: { model: `${LUNAROUTE_PROVIDER}/${id}` } });
       } catch (err) {
         log("warn", `LunaRoute: post-login default-model pick failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -185,6 +185,39 @@ describe("post-login model auto-pick", () => {
     }
   });
 
+  it("flat get() shape with a set model: never overwrites (update not called)", async () => {
+    // If client.config.get() returns the config directly (no { data } wrapper),
+    // a set default model must still be honored — the read is shape-tolerant.
+    const configGet = vi.fn().mockResolvedValue({ model: "anthropic/x" });
+    const { client, configUpdate } = makeClient(configGet);
+    const { plugin } = makePlugin({ client });
+    vi.stubGlobal("fetch", catalogFetch());
+    const hooks = await plugin({ client });
+    try {
+      await apiOf(hooks).authorize({ api_key: "lr_good" });
+      await flush();
+      expect(configUpdate).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("flat get() shape with no model: picks (update called)", async () => {
+    const configGet = vi.fn().mockResolvedValue({});
+    const { client, configUpdate } = makeClient(configGet);
+    const { plugin } = makePlugin({ client });
+    vi.stubGlobal("fetch", catalogFetch());
+    const hooks = await plugin({ client });
+    try {
+      await apiOf(hooks).authorize({ api_key: "lr_good" });
+      await flush();
+      expect(configUpdate).toHaveBeenCalledTimes(1);
+      expect(configUpdate).toHaveBeenCalledWith({ config: { model: "lunaroute/m-1" } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("re-read guard: model set between the initial read and the write → no update", async () => {
     // First get (initial read): unset. Second get (re-read guard): model set (a
     // concurrent selection) → the pick is skipped, nothing is overwritten.
