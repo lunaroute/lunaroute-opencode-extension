@@ -4,7 +4,9 @@
 
 **Goal:** Ship `@lunaroute/opencode-extension` — an OpenCode plugin giving `/connect` login, dynamic LunaRoute model catalog, request attribution, and native remote MCP injection, at parity with the pi extension.
 
-**Architecture:** Single default-exported `Plugin` function (raw TS, no build step) composing four hooks: `config` (provider stub + MCP injection via a tri-state auth-store resolution), `provider` (catalog fetch with `ctx.auth`), `auth` (browser PKCE + validated paste), `chat.headers` (attribution). MCP is config-hook-only — never written through the persisting `client.config.update` path; the only post-login write is `{ model }`.
+**Architecture:** Single default-exported `Plugin` function (raw TS, no build step) composing three hooks: `config` (provider stub + catalog-fetch model injection + MCP injection via a tri-state auth-store resolution), `auth` (browser PKCE + validated paste), `chat.headers` (attribution). MCP is config-hook-only — never written through the persisting `client.config.update` path; the only post-login write is `{ model }` (whose PATCH triggers instance reload → config hook re-runs → models + MCP refresh with the fresh key).
+
+> **Spike amendment (post Task 1, docs/compatibility-spike.md):** the plugin `provider` hook never fires for custom config-declared providers (verified in source + empirically on OpenCode 1.14.49/1.18.25). All catalog fetching and model injection therefore lives in the **config hook** (community pattern). The `provider` hook is dropped from the plugin. When logged in, the fetched catalog replaces `provider.lunaroute.models`; logged out, user-set models are preserved.
 
 **Tech Stack:** TypeScript (raw `src/`, executed by Bun inside OpenCode), vitest 4, `@opencode-ai/plugin` ^1.17.20 (types + peer).
 
@@ -12,6 +14,8 @@
 
 ## Global Constraints
 
+- **Spike-locked values** (docs/compatibility-spike.md): engines.opencode `>=1.14.49`; auth store = `${XDG_DATA_HOME || ~/.local/share}/opencode/auth.json` (xdg-basedir semantics, Linux + macOS, Windows out of v1); README says reload-automatic for MCP/rotation (gates (a)/(c) both yes); `client.config.update` maps to `PATCH /config`, deep-merging into `<project>/config.json` — only `{ model }` is ever written by us.
+- **Config-hook model injection** (spike amendment): catalog fetch + `provider.lunaroute.models` injection happen in the config hook when auth resolution is `valid`; the `provider` hook does not exist in this plugin. Fetch failures are NOT memoized (next hook run retries); successful fetches are memoized per credential for the process (hook runs multiple times per process — idempotent, no refetch storms).
 - Provider id: `lunaroute`. Device name: `opencode`. Attribution triple: `lunaroute-agent: opencode`, `x-lunaroute-session`, `lunaroute-session-id` (one UUID per plugin instance).
 - Env overrides: `LUNAROUTE_ROUTING_URL` (default `https://gw.lunaroute.com/v1`), `LUNAROUTE_API_URL` (`https://api.lunaroute.com`), `LUNAROUTE_FRONT_URL` (`https://app.lunaroute.com`), `LUNAROUTE_MCP_URL` (`https://mcp.lunaroute.com/mcp`).
 - Browser URL: `${LUNAROUTE_FRONT_URL}/device-auth/opencode?port=&state=&challenge=`; exchange `POST ${LUNAROUTE_API_URL}/v1/auth/exchange` with `{ code, verifier, label: hostname() }` (hex-sha256 PKCE, 3-minute loopback timeout).
@@ -159,7 +163,7 @@ Date: <date> · OpenCode tested: <version> · Plugin pkg tested: <version>
 
 ## Consequences
 - engines.opencode: <ver>
-- resolveAuthStorePath data-dir resolution: <exact logic>
+- resolveAuthStorePath data-dir resolution: `${XDG_DATA_HOME || home/.local/share}/opencode/auth.json` (xdg-basedir semantics, Linux + macOS per spike; Windows out of v1)
 - README MCP/rotation wording: <reload-automatic | restart-required>
 ```
 
@@ -209,11 +213,11 @@ git add docs/compatibility-spike.md && git commit -m "docs: compatibility spike 
     "typescript": "^5.9.0",
     "vitest": "^4.1.0"
   },
-  "engines": { "opencode": ">=<SPIKE-MINIMUM-VERSION>" }
+  "engines": { "opencode": ">=1.14.49" }
 }
 ```
 
-(Set `engines.opencode` to the spike's minimum version.)
+(Set per the spike decision record: `engines.opencode` `>=1.14.49` — already filled in above.)
 
 - [ ] **Step 2: Create `tsconfig.json`, `vitest.config.ts`, `.gitignore`**
 
@@ -969,14 +973,15 @@ export function createLunarouteAuth(opts: {
 - Test: `tests/models.test.ts`
 
 **Interfaces:**
-- Consumes (Tasks 3–4): `mapCatalog`, `MappedModel`, `defaultModelId`, `resolveRoutingUrl`, `LUNAROUTE_PROVIDER`, attribution headers
+- Consumes (Tasks 3–4): `mapCatalog`, `MappedModel`, `defaultModelId`, `resolveRoutingUrl`, `LUNAROUTE_PROVIDER`, attribution headers, `sessionId` (from the plugin instance, Task 8)
 - Produces:
   - `type ProviderModel = Record<string, unknown>` (structural OpenCode ModelV2 — exact fields below)
   - `type CatalogResult = { models: MappedModel[]; skipped: { id: string; reason: string }[] } | { error: string }`
-  - `fetchCatalog(routingUrl, key, opts?: { fetch?: typeof fetch; timeoutMs?: number }): Promise<CatalogResult>` — 5s `AbortSignal.timeout`, single attempt, `Authorization: Bearer`, attribution headers
+  - `fetchCatalog(routingUrl, key, sessionId, opts?: { fetch?: typeof fetch; timeoutMs?: number }): Promise<CatalogResult>` — 5s `AbortSignal.timeout`, single attempt, `Authorization: Bearer`, attribution headers built from `sessionId`
   - `toProviderModels(models: MappedModel[], baseUrl: string): Record<string, ProviderModel>`
-  - `injectProviderStub(cfg: ConfigLike, routingUrl: string): void` where `ConfigLike = { provider?: Record<string, Record<string, unknown>>; [k: string]: unknown }`
-  - `createCatalogMemo(): (key: string) => Promise<CatalogResult> | null` — in-flight dedup keyed by credential
+  - `injectProviderStub(cfg: ConfigLike, routingUrl: string): void` where `ConfigLike = { provider?: Record<string, Record<string, unknown>>; [k: string]: unknown }` — never sets `models`
+  - `injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: string): void` — sets `provider.lunaroute.models = toProviderModels(...)` (replaces; catalog is the source of truth when logged in)
+  - `createCatalogMemo(fetchFor: (key: string) => Promise<CatalogResult>): (key: string) => Promise<CatalogResult>` — per-process per-credential memo: concurrent calls share one in-flight fetch; a successful result is reused for later calls with the same key; a FAILED result is not cached (next call refetches)
 
 - [ ] **Step 1: Failing tests** (`tests/models.test.ts`)
 
@@ -990,7 +995,7 @@ const mk = (id: string): MappedModel => ({ id, name: id, reasoning: false, tool_
 describe("fetchCatalog", () => {
   it("fetches with bearer + attribution, maps entries, reports skips", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: "m-1" }, { id: "m-1" }, null] }) });
-    const r = await fetchCatalog("http://gw/v1", "lr_k", { fetch: fetchMock as never });
+    const r = await fetchCatalog("http://gw/v1", "lr_k", "sess-1", { fetch: fetchMock as never });
     expect(r).toHaveProperty("models");
     if ("models" in r) {
       expect(r.models.map((m) => m.id)).toEqual(["m-1"]);
@@ -1000,20 +1005,21 @@ describe("fetchCatalog", () => {
     expect(url).toBe("http://gw/v1/models");
     expect(init.headers["Authorization"]).toBe("Bearer lr_k");
     expect(init.headers["lunaroute-agent"]).toBe("opencode");
+    expect(init.headers["x-lunaroute-session"]).toBe("sess-1");
   });
   it("returns error on !ok and on fetch failure", async () => {
-    expect(await fetchCatalog("http://gw/v1", "lr_k", { fetch: vi.fn().mockResolvedValue({ ok: false, status: 401 }) as never })).toEqual({ error: "HTTP 401" });
-    expect(await fetchCatalog("http://gw/v1", "lr_k", { fetch: vi.fn().mockRejectedValue(new Error("boom")) as never })).toEqual({ error: "boom" });
+    expect(await fetchCatalog("http://gw/v1", "lr_k", "sess-1", { fetch: vi.fn().mockResolvedValue({ ok: false, status: 401 }) as never })).toEqual({ error: "HTTP 401" });
+    expect(await fetchCatalog("http://gw/v1", "lr_k", "sess-1", { fetch: vi.fn().mockRejectedValue(new Error("boom")) as never })).toEqual({ error: "boom" });
   });
   it("non-object body -> error", async () => {
-    expect(await fetchCatalog("http://gw/v1", "lr_k", { fetch: vi.fn().mockResolvedValue({ ok: true, json: async () => "nope" }) as never })).toHaveProperty("error");
+    expect(await fetchCatalog("http://gw/v1", "lr_k", "sess-1", { fetch: vi.fn().mockResolvedValue({ ok: true, json: async () => "nope" }) as never })).toHaveProperty("error");
   });
 });
 
 describe("toProviderModels", () => {
   it("produces the ModelV2 shape with api.url/npm, limits, variants, zeros cost", () => {
-    const [id, model] of Object.entries(toProviderModels([mk("m-1")], "http://gw/v1"))[0]; // destructure helper
-    void id;
+    const entry = Object.entries(toProviderModels([mk("m-1")], "http://gw/v1"))[0];
+    const model = entry[1];
     expect(model).toMatchObject({
       id: "m-1", name: "m-1", providerID: "lunaroute", attachment: false, reasoning: false,
       tool_call: true, status: "active",
@@ -1043,24 +1049,50 @@ describe("injectProviderStub", () => {
   });
 });
 
+describe("injectModels", () => {
+  it("sets provider.lunaroute.models from the mapped catalog (replaces prior)", () => {
+    const cfg: Record<string, unknown> = {};
+    injectProviderStub(cfg as never, "http://gw/v1");
+    injectModels(cfg as never, [mk("m-1")], "http://gw/v1");
+    const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
+    expect(provider.models).toMatchObject({ "m-1": { id: "m-1", api: { url: "http://gw/v1" } } });
+    injectModels(cfg as never, [mk("m-2")], "http://gw/v1");
+    expect(Object.keys((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models!)).toEqual(["m-2"]);
+  });
+});
+
 describe("createCatalogMemo", () => {
-  it("shares a single in-flight fetch for concurrent same-key calls", async () => {
+  it("shares one in-flight fetch for concurrent same-key calls; success is reused sequentially", async () => {
     let calls = 0;
     const slow = async () => { calls++; await new Promise((r) => setTimeout(r, 20)); return { ok: true, json: async () => ({ data: [{ id: "m" }] }) }; };
-    const memo = createCatalogMemo(() => Promise.resolve(fetchCatalog("http://gw/v1", "k", { fetch: slow as never })));
-    const [a, b] = await Promise.all([memo(), memo()]);
+    const memo = createCatalogMemo((k) => fetchCatalog("http://gw/v1", k, "sess-1", { fetch: slow as never }));
+    const [a, b] = await Promise.all([memo("k"), memo("k")]);
     expect(calls).toBe(1);
     expect(a).toEqual(b);
+    const c = await memo("k"); // sequential reuse — no third fetch
+    expect(calls).toBe(1);
+    expect(c).toEqual(a);
+  });
+  it("does not cache failures; a different key refetches", async () => {
+    let calls = 0;
+    let fail = true;
+    const flaky = async () => { calls++; if (fail) throw new Error("boom"); return { ok: true, json: async () => ({ data: [{ id: "m" }] }) }; };
+    const memo = createCatalogMemo((k) => fetchCatalog("http://gw/v1", k, "sess-1", { fetch: flaky as never }));
+    await memo("k"); // fails
+    fail = false;
+    const r = await memo("k"); // retries — failure was not cached
+    expect(calls).toBe(2);
+    expect(r).toHaveProperty("models");
+    await memo("other"); // different key → refetch
+    expect(calls).toBe(3);
   });
 });
 ```
 
-Fix the deliberate destructure bug in the `toProviderModels` test before running (write `const entry = Object.entries(...)[0]; const model = entry[1];`).
-
 - [ ] **Step 2: Run** → FAIL. **Step 3: Implement `src/models.ts`**
 
 ```ts
-import { buildAttributionHeaders, defaultModelId, LUNAROUTE_PROVIDER, mapCatalog, resolveRoutingUrl, type MappedModel } from "./lunaroute.js";
+import { buildAttributionHeaders, LUNAROUTE_PROVIDER, mapCatalog, type MappedModel } from "./lunaroute.js";
 
 export type ConfigLike = Record<string, unknown>;
 
@@ -1069,12 +1101,13 @@ export type CatalogResult = { models: MappedModel[]; skipped: { id: string; reas
 export async function fetchCatalog(
   routingUrl: string,
   key: string,
+  sessionId: string,
   opts: { fetch?: typeof fetch; timeoutMs?: number } = {},
 ): Promise<CatalogResult> {
   const doFetch = opts.fetch ?? fetch;
   try {
     const res = await doFetch(`${routingUrl}/models`, {
-      headers: { Authorization: `Bearer ${key}`, ...buildAttributionHeaders(key) },
+      headers: { Authorization: `Bearer ${key}`, ...buildAttributionHeaders(sessionId) },
       signal: AbortSignal.timeout(opts.timeoutMs ?? 5000),
     });
     if (!res.ok) return { error: `HTTP ${res.status}` };
@@ -1133,23 +1166,41 @@ export function injectProviderStub(cfg: ConfigLike, routingUrl: string): void {
   };
 }
 
-/** In-flight dedup: concurrent provider-hook calls share one fetch per credential. */
+/** Catalog is the source of truth when logged in: fetched models replace provider.lunaroute.models. */
+export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: string): void {
+  const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
+  cfg.provider = providers;
+  const provider = providers[LUNAROUTE_PROVIDER] ?? {};
+  provider.models = toProviderModels(models, baseUrl);
+  providers[LUNAROUTE_PROVIDER] = provider;
+}
+
+/** Per-process per-credential memo: concurrent callers share one in-flight fetch;
+ * a SUCCESSFUL result is reused for later same-key calls (config hook runs multiple
+ * times per process); a FAILED result is never cached — the next call retries. */
 export function createCatalogMemo(fetchFor: (key: string) => Promise<CatalogResult>): (key: string) => Promise<CatalogResult> {
-  let key: string | null = null;
-  let inFlight: Promise<CatalogResult> | null = null;
+  const cache = new Map<string, Promise<CatalogResult>>();
   return (k: string) => {
-    if (!inFlight || key !== k) {
-      key = k;
-      inFlight = fetchFor(k).finally(() => { inFlight = null; });
+    let entry = cache.get(k);
+    if (!entry) {
+      entry = fetchFor(k).then(
+        (result) => {
+          if ("error" in result) cache.delete(k); // failure: do not cache
+          return result;
+        },
+        (err) => {
+          cache.delete(k);
+          throw err;
+        },
+      );
+      cache.set(k, entry);
     }
-    return inFlight;
+    return entry;
   };
 }
 ```
 
-Note: `buildAttributionHeaders(key)` above is WRONG on purpose — do not ship it. Use a session id: `fetchCatalog`'s attribution must use the plugin instance's session id. Change the signature to `fetchCatalog(routingUrl, key, sessionId, opts)` and pass `buildAttributionHeaders(sessionId)`; update the test accordingly (assert `init.headers["x-lunaroute-session"]` is the session id). Fix this in the implementation and tests before committing — the plan flags it here so the executor does not copy the bug.
-
-Also drop the unused `defaultModelId`/`resolveRoutingUrl` imports until Task 8 uses them.
+(The `fetchFor` thunk receives the credential; note the memo caches the PROMISE — same-key callers all see the same result object. `fetchCatalog` never rejects — it returns `{ error }` — but the memo still guards a rejecting `fetchFor` for safety.)
 
 - [ ] **Step 4: Run** → PASS. **Step 5: Commit** `feat: catalog fetch (5s timeout, attribution) + ModelV2 mapping + provider stub injection + in-flight dedup`
 
@@ -1166,7 +1217,7 @@ Also drop the unused `defaultModelId`/`resolveRoutingUrl` imports until Task 8 u
 - Produces:
   - `type AuthResolution = { state: "valid"; key: string } | { state: "logged-out" } | { state: "indeterminate"; reason: string }`
   - `type AuthStoreFS = { readFile(path: string): Promise<string> }`
-  - `resolveAuthStorePath(env: NodeJS.ProcessEnv, home: string): string` — `<XDG_DATA_HOME | home/.local/share>/opencode/auth.json` (adjust per spike decision record for macOS; keep it a pure function reading the spike-documented rule)
+  - `resolveAuthStorePath(env: NodeJS.ProcessEnv, home: string): string` — `<XDG_DATA_HOME | home/.local/share>/opencode/auth.json` (spike-verified: xdg-basedir semantics on Linux AND macOS — no platform branch needed in v1; pure function)
   - `resolveAuthState(storePath: string, fs?: AuthStoreFS): Promise<AuthResolution>` — single read, no retry; ENOENT → `indeterminate("auth store missing")`; parse error → `indeterminate("auth store unparseable")`; non-object store → same; entry absent → `logged-out`; entry present: api `key`/oauth `access` via `isValidCredentialShape` → `valid` else `indeterminate("credential present but invalid")`
   - `isManagedShape(entry: unknown, mcpUrl: string): boolean`
   - `type ReconcilerLog = (level: "info" | "warn", message: string) => void`
@@ -1411,7 +1462,7 @@ export type AuthStoreFS = { readFile(path: string): Promise<string> };
 
 const defaultFS: AuthStoreFS = { readFile: (p) => fsp.readFile(p, "utf8") };
 
-/** Lexical store path — identity is the path, not the inode (per spec; adjust per spike record for macOS). */
+/** Lexical store path — identity is the path, not the inode (spike-verified: xdg-basedir semantics on Linux and macOS). */
 export function resolveAuthStorePath(env: NodeJS.ProcessEnv, home: string): string {
   const dataHome = env.XDG_DATA_HOME || join(home, ".local", "share");
   return join(dataHome, "opencode", "auth.json");
@@ -1523,15 +1574,15 @@ export function createMcpReconciler(mcpUrl: string, log: ReconcilerLog, sessionI
 
 ---
 
-### Task 8: Plugin wiring — config hook, provider hook, chat.headers, post-login (src/index.ts)
+### Task 8: Plugin wiring — config hook (stub + models + MCP), chat.headers, post-login (src/index.ts)
 
 **Files:**
 - Create: `src/index.ts`
 - Test: `tests/index.test.ts`
 
 **Interfaces:**
-- Consumes: everything from Tasks 3–7 plus `createLunarouteAuth` (Task 5), `fetchCatalog`/`toProviderModels`/`injectProviderStub`/`createCatalogMemo` (Task 6), `resolveAuthStorePath`/`resolveAuthState`/`createMcpReconciler` (Task 7)
-- Produces: `createLunaroutePlugin(opts?: PluginDeps): Plugin` (default export) where `PluginDeps = { env?, home?, log?, now?, client? }` for tests; the plugin returns `{ config, provider, auth, "chat.headers", dispose }`
+- Consumes: everything from Tasks 3–7 plus `createLunarouteAuth` (Task 5), `fetchCatalog`/`toProviderModels`/`injectProviderStub`/`injectModels`/`createCatalogMemo` (Task 6), `resolveAuthStorePath`/`resolveAuthState`/`createMcpReconciler` (Task 7)
+- Produces: `createLunaroutePlugin(opts?: PluginDeps): Plugin` (default export) where `PluginDeps = { env?, home?, log?, client? }` for tests; the plugin returns `{ config, auth, "chat.headers", dispose }` — **no `provider` hook** (spike finding: it never fires for custom config providers)
 
 - [ ] **Step 1: Failing tests** (`tests/index.test.ts`)
 
@@ -1559,16 +1610,41 @@ function makePlugin(overrides: { fs?: object; client?: object } = {}) {
 }
 
 describe("config hook", () => {
-  it("injects provider stub and MCP when a valid key exists, in order", async () => {
+  it("injects provider stub + models + MCP when a valid key exists; memo prevents refetch on second run", async () => {
     const fs = { readFile: async () => JSON.stringify({ lunaroute: { type: "api", key: "lr_good" } }) };
-    const { plugin } = makePlugin({ fs });
-    const hooks = await plugin({} as never, undefined as never);
-    const cfg: Record<string, unknown> = {};
-    await hooks.config!(cfg as never, { storeKey: AUTH_PATH, fs } as never);
-    expect((cfg.provider as Record<string, unknown>).lunaroute).toMatchObject({ options: { baseURL: "http://gw/v1" } });
-    expect((cfg.mcp as Record<string, Record<string, string>>).lunaroute.headers["LUNAROUTE-API-KEY"]).toBe("lr_good");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: "m-1" }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { plugin } = makePlugin({ fs });
+      const hooks = await plugin({} as never, undefined as never);
+      const cfg: Record<string, unknown> = {};
+      await hooks.config!(cfg as never, { storeKey: AUTH_PATH, fs } as never);
+      expect((cfg.provider as Record<string, unknown>).lunaroute).toMatchObject({ options: { baseURL: "http://gw/v1" } });
+      expect((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models).toHaveProperty("m-1");
+      expect((cfg.mcp as Record<string, Record<string, string>>).lunaroute.headers["LUNAROUTE-API-KEY"]).toBe("lr_good");
+      const cfg2: Record<string, unknown> = {};
+      await hooks.config!(cfg2 as never, { storeKey: AUTH_PATH, fs } as never);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // memoized per credential
+      expect((cfg2.provider as Record<string, Record<string, unknown>>).lunaroute.models).toHaveProperty("m-1");
+    } finally { vi.unstubAllGlobals(); }
   });
-  it("provider stub lands even when MCP is skipped (no key) — per-contributor error isolation", async () => {
+  it("logged out: provider stub only — no models, no MCP, silent", async () => {
+    const fs = { readFile: async () => JSON.stringify({}) };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { plugin, logs } = makePlugin({ fs });
+      const hooks = await plugin({} as never, undefined as never);
+      const cfg: Record<string, unknown> = {};
+      await hooks.config!(cfg as never, { storeKey: AUTH_PATH, fs } as never);
+      expect((cfg.provider as Record<string, unknown>).lunaroute).toBeDefined();
+      expect((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models).toBeUndefined();
+      expect((cfg.mcp as Record<string, unknown> | undefined)?.lunaroute).toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(logs).toEqual([{ level: "info", message: "Run /connect and choose LunaRoute to start using LunaRoute." }]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("indeterminate (unreadable store): stub lands, models + MCP untouched, one warn — per-contributor error isolation", async () => {
     const fs = { readFile: async () => { throw new Error("EACCES"); } };
     const { plugin, logs } = makePlugin({ fs });
     const hooks = await plugin({} as never, undefined as never);
@@ -1578,17 +1654,18 @@ describe("config hook", () => {
     expect((cfg.mcp as Record<string, unknown> | undefined)?.lunaroute).toBeUndefined();
     expect(logs.some((l) => l.level === "warn")).toBe(true);
   });
-});
-
-describe("provider hook", () => {
-  it("returns mapped models with ctx.auth; {} without; error → {}", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: "m-1" }] }) });
-    const { plugin } = makePlugin();
-    const hooks = await plugin({} as never, undefined as never);
-    const models = await (hooks.provider as { models: (p: unknown, ctx: { auth?: unknown }) => Promise<Record<string, unknown>> }).models({}, { auth: { type: "api", key: "lr_good" } });
-    expect(models).toHaveProperty("m-1");
-    expect(await (hooks.provider as never as { models: (p: unknown, ctx: { auth?: unknown }) => Promise<Record<string, unknown>> }).models({}, {})).toEqual({});
-    void fetchMock;
+  it("catalog fetch failure: stub + MCP land, no models, one warn", async () => {
+    const fs = { readFile: async () => JSON.stringify({ lunaroute: { type: "api", key: "lr_good" } }) };
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("gateway down")));
+    try {
+      const { plugin, logs } = makePlugin({ fs });
+      const hooks = await plugin({} as never, undefined as never);
+      const cfg: Record<string, unknown> = {};
+      await hooks.config!(cfg as never, { storeKey: AUTH_PATH, fs } as never);
+      expect((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models).toBeUndefined();
+      expect((cfg.mcp as Record<string, Record<string, string>>).lunaroute.headers["LUNAROUTE-API-KEY"]).toBe("lr_good");
+      expect(logs.some((l) => l.level === "warn" && /catalog/.test(l.message))).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
   });
 });
 
@@ -1652,8 +1729,8 @@ import type { Plugin } from "@opencode-ai/plugin";
 import {
   buildAttributionHeaders, defaultModelId, generateSessionId, LUNAROUTE_PROVIDER, resolveMcpUrl, resolveRoutingUrl,
 } from "./lunaroute.js";
-import { createLunarouteAuth, resolveStoredCredential } from "./login.js";
-import { createCatalogMemo, fetchCatalog, injectProviderStub, toProviderModels } from "./models.js";
+import { createLunarouteAuth } from "./login.js";
+import { createCatalogMemo, fetchCatalog, injectModels, injectProviderStub } from "./models.js";
 import { createMcpReconciler, resolveAuthState, resolveAuthStorePath, type AuthStoreFS } from "./mcp.js";
 
 export type PluginLog = (level: "info" | "warn", message: string) => void;
@@ -1679,6 +1756,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): Plugin {
   const log: PluginLog = deps.log ?? (() => {});
   const reconciler = createMcpReconciler(mcpUrl, log, sessionId);
   const catalogMemo = createCatalogMemo((key) => fetchCatalog(routingUrl, key, sessionId));
+  let firstRunHintShown = false;
 
   return async (input, _options) => {
     const clientOf = (runtime?: PluginRuntime) => runtime?.client ?? (input as unknown as { client?: PluginRuntime["client"] }).client;
@@ -1689,13 +1767,15 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): Plugin {
         if (!client) return;
         const current = await client.config.get();
         if (current?.data?.model) return;
-        const catalog = await fetchCatalog(routingUrl, key, sessionId);
+        const catalog = await catalogMemo(key);
         if (!("models" in catalog) || !catalog.models.length) return;
         const id = defaultModelId(catalog.models);
         if (!id) return;
         const fresh = await client.config.get(); // re-read guard
         if (fresh?.data?.model) return;
         await client.config.update({ config: { model: `${LUNAROUTE_PROVIDER}/${id}` } });
+        // The update marks the instance for disposal; on reload the config hook
+        // re-runs (spike gate (a)) and re-injects models + MCP with the fresh key.
       } catch (err) {
         log("warn", `LunaRoute: post-login default-model pick failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1703,26 +1783,32 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): Plugin {
 
     return {
       config: async (cfg: Record<string, unknown>, runtime?: PluginRuntime) => {
+        // Contributor 1: provider stub — always lands, individually isolated.
         try { injectProviderStub(cfg, routingUrl); } catch (err) { log("warn", `LunaRoute: provider stub injection failed: ${err instanceof Error ? err.message : String(err)}`); }
+        // One auth resolution feeds both contributors 2 (models) and 3 (MCP).
         try {
           const storeKey = runtime?.storeKey ?? resolveAuthStorePath(env, home);
           const resolution = await resolveAuthState(storeKey, runtime?.fs);
-          reconciler.reconcile(cfg, resolution, storeKey);
+          try {
+            if (resolution.state === "valid") {
+              const result = await catalogMemo(resolution.key);
+              if ("error" in result) {
+                log("warn", `LunaRoute: catalog fetch failed: ${result.error}`);
+              } else {
+                for (const s of result.skipped) log("warn", `LunaRoute: skipped catalog entry "${s.id}": ${s.reason}`);
+                if (result.skipped.length && !result.models.length) log("warn", `LunaRoute: catalog had ${result.skipped.length} invalid entries, all skipped`);
+                injectModels(cfg, result.models, routingUrl);
+              }
+            } else if (resolution.state === "logged-out" && !firstRunHintShown) {
+              firstRunHintShown = true;
+              log("info", "Run /connect and choose LunaRoute to start using LunaRoute.");
+            }
+            // logged-out / indeterminate: leave any existing models untouched (fail-safe retention).
+          } catch (err) { log("warn", `LunaRoute: model injection failed: ${err instanceof Error ? err.message : String(err)}`); }
+          try { reconciler.reconcile(cfg, resolution, storeKey); } catch (err) { log("warn", `LunaRoute: MCP injection failed: ${err instanceof Error ? err.message : String(err)}`); }
         } catch (err) {
-          log("warn", `LunaRoute: MCP injection failed: ${err instanceof Error ? err.message : String(err)}`);
+          log("warn", `LunaRoute: auth resolution failed: ${err instanceof Error ? err.message : String(err)}`);
         }
-      },
-      provider: {
-        id: LUNAROUTE_PROVIDER,
-        models: async (_provider: unknown, ctx: { auth?: unknown }) => {
-          const key = resolveStoredCredential(ctx.auth);
-          if (!key) return {};
-          const result = await catalogMemo(key);
-          if ("error" in result) { log("warn", `LunaRoute: catalog fetch failed: ${result.error}`); return {}; }
-          for (const s of result.skipped) log("warn", `LunaRoute: skipped catalog entry "${s.id}": ${s.reason}`);
-          if (result.skipped.length && !result.models.length) log("warn", `LunaRoute: catalog had ${result.skipped.length} invalid entries, all skipped`);
-          return toProviderModels(result.models, routingUrl);
-        },
       },
       auth: createLunarouteAuth({
         env,
@@ -1742,7 +1828,7 @@ export default createLunaroutePlugin();
 
 (Reconcile the `onLoginSuccess` wiring with Task 5's `createLunarouteAuth` options — the paste-method test in Task 8 calls `authorize` with the global `fetch` stubbed, and `postLoginRefresh` must use the runtime client; the production default export wires `input.client`. If the structural mismatch with `@opencode-ai/plugin`'s `Plugin` type fights the compiler, keep `createLunaroutePlugin` returning the structural hooks object and export it with a targeted `as unknown as Plugin` cast at the default export only — never silence types inside the modules.)
 
-- [ ] **Step 4: Run** → PASS; `npm run check` green. **Step 5: Commit** `feat: plugin wiring — config/provider/auth/chat.headers hooks + guarded model auto-pick`
+- [ ] **Step 4: Run** → PASS; `npm run check` green. **Step 5: Commit** `feat: plugin wiring — config-hook model injection, auth, chat.headers + guarded model auto-pick`
 
 ---
 
@@ -1764,7 +1850,7 @@ export default createLunaroutePlugin();
   - Configuration: the four `LUNAROUTE_*` env vars (same table as the pi README, `/device-auth/opencode` for FRONT_URL).
   - Troubleshooting: no models after login (re-run `/connect`); key rotation (re-run `/connect`; MCP picks up the new key on reload/restart per spike record); **credential removal** (delete the `lunaroute` entry from `auth.json` — the plugin stops injecting on the next start; chat/MCP keep the old key until then — server-side revocation cuts access); unreadable/corrupt auth.json (one secret-free warn, behaves as logged out, re-run `/connect` to rewrite).
   - Development: `npm install && npm run check`; manual smoke via `docs/smoke-checklist.md`; `npm pack --dry-run`.
-- [ ] **Step 2: Write `docs/smoke-checklist.md`** — the spec's acceptance criteria as a runnable checklist (staging env vars): all eight criteria, each with pass/fail and where to look (gateway logs for the attribution triple, staging MCP server for `LUNAROUTE-API-KEY` + agent + session, auth.json for the key, config files for the absence of the key/mcp, tarball install for load-from-npm).
+- [ ] **Step 2: Write `docs/smoke-checklist.md`** — the spec's acceptance criteria as a runnable checklist (staging env vars): all eight criteria, each with pass/fail and where to look (gateway logs for the attribution triple, staging MCP server for `LUNAROUTE-API-KEY` + agent + session, auth.json for the key, config files for the absence of the key/mcp, tarball install for load-from-npm). **Plus the two spike-deferred items, first on the list**: (0a) TUI `/models` picker shows LunaRoute models before first use (the headless spike could not verify the session-runner's pre-build availability gate — if this fails, the post-login `{ model }` auto-pick is the documented mitigation); (0b) browser flow against staging `/device-auth/opencode` end-to-end.
 - [ ] **Step 3: Run the smoke checklist against staging** (requires: staging env vars set, an OpenCode install, a LunaRoute account). Record results in the checklist file. Any FAIL: fix the code, re-run, note the fix in the commit message.
 - [ ] **Step 4: Commit** `docs: README + staging smoke checklist (run result: <pass|N fixed>)`
 
