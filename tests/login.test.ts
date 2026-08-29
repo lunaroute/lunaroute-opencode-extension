@@ -42,7 +42,6 @@ function makeAuth(overrides: Partial<Parameters<typeof createLunarouteAuth>[0]> 
       verifier: () => "v".repeat(64),
       state: () => "st-1",
       exchange: async () => goodExchange,
-      now: () => 1_000_000,
     },
     ...overrides,
   });
@@ -117,13 +116,15 @@ describe("browser method (full flow)", () => {
     expect(onLoginSuccess).toHaveBeenCalledWith("lr_new");
   });
 
-  it("state mismatch fails the callback", async () => {
-    const { auth, onLoginSuccess } = makeAuth();
+  it("state mismatch fails the callback and logs the specific cause", async () => {
+    const logs: { level: string; message: string }[] = [];
+    const { auth, onLoginSuccess } = makeAuth({ log: (level, message) => logs.push({ level, message }) });
     const started = await oauthOf(auth).authorize();
     const port = Number(new URL(started.url).searchParams.get("port"));
     await fetch(`http://127.0.0.1:${port}/callback?code=raw-code&state=WRONG`);
     expect(await started.callback()).toEqual({ type: "failed" });
     expect(onLoginSuccess).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.message === "LunaRoute browser login failed: state mismatch")).toBe(true);
   });
 
   it("times out after 3 minutes, fails (never rejects), and releases the listener", async () => {
@@ -164,6 +165,30 @@ describe("paste method", () => {
       expect.objectContaining({ headers: { Authorization: "Bearer lr_good" } }),
     );
     expect(onLoginSuccess).toHaveBeenCalledWith("lr_good");
+  });
+
+  it("includes the attribution triple on the validation fetch when sessionId is provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
+    const { auth } = makeAuth({
+      sessionId: "sess-42",
+      deps: { fetch: fetchMock as unknown as typeof fetch },
+    });
+    await apiOf(auth).authorize({ api_key: "lr_good" });
+    const init = fetchMock.mock.calls[0][1] as { headers: Record<string, string> };
+    expect(init.headers["Authorization"]).toBe("Bearer lr_good");
+    expect(init.headers["lunaroute-agent"]).toBe("opencode");
+    expect(init.headers["x-lunaroute-session"]).toBe("sess-42");
+    expect(init.headers["lunaroute-session-id"]).toBe("sess-42");
+  });
+
+  it("omits attribution when no sessionId is provided (headers unchanged)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
+    const { auth } = makeAuth({
+      deps: { fetch: fetchMock as unknown as typeof fetch },
+    });
+    await apiOf(auth).authorize({ api_key: "lr_good" });
+    const init = fetchMock.mock.calls[0][1] as { headers: Record<string, string> };
+    expect(init.headers).toEqual({ Authorization: "Bearer lr_good" });
   });
   it("fails on bad shape without touching the network", async () => {
     const fetchMock = vi.fn();

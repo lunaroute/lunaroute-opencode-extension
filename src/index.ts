@@ -47,7 +47,7 @@ export type PluginDeps = {
   client?: TestClient;
 };
 
-export type LunaouteHooks = {
+export type LunarouteHooks = {
   config: (cfg: Record<string, unknown>, runtime?: PluginRuntime) => Promise<void>;
   auth: AuthHook;
   "chat.headers": (
@@ -57,14 +57,14 @@ export type LunaouteHooks = {
   dispose: () => Promise<void>;
 };
 
-export type LunaoutePlugin = (input: { client?: TestClient }, _options?: unknown) => Promise<LunaouteHooks>;
+export type LunaroutePlugin = (input: { client?: TestClient }, _options?: unknown) => Promise<LunarouteHooks>;
 
 /**
  * Build the LunaRoute plugin. One call per process: the session id, catalog
  * memo, MCP reconciler state, and the first-run hint flag are shared by every
  * invocation of the returned function (OpenCode may invoke it per instance).
  */
-export function createLunaroutePlugin(deps: PluginDeps = {}): LunaoutePlugin {
+export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir();
   const sessionId = generateSessionId();
@@ -157,6 +157,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaoutePlugin {
       auth: createLunarouteAuth({
         env,
         log,
+        sessionId,
         onLoginSuccess: (key) => {
           void postLoginRefresh(key);
         },

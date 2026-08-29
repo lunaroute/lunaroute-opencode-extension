@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createLunaroutePlugin, type LunaouteHooks, type TestClient } from "../src/index.js";
+import { createLunaroutePlugin, type LunarouteHooks, type TestClient } from "../src/index.js";
 
 const ENV = {
   LUNAROUTE_ROUTING_URL: "http://gw/v1",
@@ -33,7 +33,7 @@ function makePlugin(overrides: { client?: TestClient } = {}) {
 // before asserting its side effects.
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
 
-const apiOf = (hooks: LunaouteHooks) =>
+const apiOf = (hooks: LunarouteHooks) =>
   hooks.auth.methods.find((m) => m.type === "api") as {
     type: "api";
     authorize: (inputs?: Record<string, string>) => Promise<unknown>;

@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { hostname } from "node:os";
 import type { AuthHook } from "@opencode-ai/plugin";
 import {
+  buildAttributionHeaders,
   buildDeviceAuthUrl,
   buildExchangeBody,
   computePkceChallenge,
@@ -79,7 +80,6 @@ export type LoginDeps = {
   exchange?: typeof exchangeCode;
   state?: () => string;
   verifier?: () => string;
-  now?: () => number;
   fetch?: typeof fetch;
 };
 export type AuthLog = (level: "info" | "warn", message: string) => void;
@@ -100,6 +100,7 @@ export function createLunarouteAuth(opts: {
   env: NodeJS.ProcessEnv;
   onLoginSuccess?: (key: string) => void;
   log?: AuthLog;
+  sessionId?: string;
   deps?: LoginDeps;
 }): AuthHook {
   const log = opts.log ?? (() => {});
@@ -108,7 +109,6 @@ export function createLunarouteAuth(opts: {
     exchange: exchangeCode,
     state: generateState,
     verifier: generatePkceVerifier,
-    now: Date.now,
     fetch: fetch,
     ...opts.deps,
   };
@@ -151,7 +151,10 @@ export function createLunarouteAuth(opts: {
               });
               try {
                 const cb = await Promise.race([server.waitForCallback(), timeout]);
-                if (cb.state !== state) return fail();
+                if (cb.state !== state) {
+                  log("warn", "LunaRoute browser login failed: state mismatch");
+                  return fail();
+                }
                 const result = await d.exchange(resolveApiUrl(opts.env), {
                   code: cb.code,
                   verifier,
@@ -190,7 +193,10 @@ export function createLunarouteAuth(opts: {
           if (!isValidCredentialShape(key)) return fail();
           try {
             const res = await d.fetch(`${resolveRoutingUrl(opts.env)}/models`, {
-              headers: { Authorization: `Bearer ${key}` },
+              headers: {
+                Authorization: `Bearer ${key}`,
+                ...(opts.sessionId ? buildAttributionHeaders(opts.sessionId) : {}),
+              },
             });
             return res.ok ? succeed(key) : fail();
           } catch {
