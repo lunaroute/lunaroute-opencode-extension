@@ -133,6 +133,33 @@ Package dry run:
 npm pack --dry-run
 ```
 
+## Release
+
+Publishing is tag-driven via [
+`.github/workflows/publish.yml`](./.github/workflows/publish.yml), using npm
+Trusted Publishing (OIDC) — no NPM_TOKEN secret.
+
+One-time setup (human, out of band): add a **Trusted Publisher** entry on
+[npmjs.com](https://www.npmjs.com/settings/lunaroute/packages) for
+`@lunaroute/opencode-extension` pointing at
+
+- org/user: `lunaroute`
+- repo: `lunaroute-opencode-extension`
+- workflow: `publish.yml`
+- allowed: `npm publish`
+
+Then, for every release:
+
+1. The staging smoke checklist ([docs/smoke-checklist.md](./docs/smoke-checklist.md))
+   must be green.
+2. Tag and push (e.g. `git tag v0.1.0 && git push origin v0.1.0`) — the tag
+   push triggers the workflow, which runs `npm run check` as a gate and
+   publishes with provenance. (If Trusted Publishing is not yet usable — the
+   package must exist on npm first — the initial publish can be done locally
+   with `npm publish --provenance`.)
+3. Verify: the workflow is green and
+   `npm view @lunaroute/opencode-extension version` shows the new version.
+
 ## License
 
 MIT License. See [LICENSE](./LICENSE).

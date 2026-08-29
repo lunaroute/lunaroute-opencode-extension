@@ -1,0 +1,48 @@
+name: publish
+
+# Tag-driven publish using npm Trusted Publishing (OIDC) + provenance.
+# No NPM_TOKEN secret: `id-token: write` lets npm CLI mint short-lived
+# credentials bound to this workflow + package.
+#
+# Prerequisite (one-time, out of band): add a Trusted Publisher entry on
+# https://npmjs.com for @lunaroute/opencode-extension pointing at
+#   org/user: lunaroute
+#   repo:     lunaroute-opencode-extension
+#   workflow: publish.yml
+#   allowed:  npm publish
+#
+# If the very first publish needs to be done locally (Trusted Publishing
+# requires the package to already exist on npm), use
+#   `npm publish --provenance`
+# and let all subsequent publishes go through this workflow.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Node 24 bundles npm 11.x, which satisfies the Trusted Publishing
+          # floor (npm CLI >= 11.5.1). Node 22 bundles npm 10.x, which does NOT.
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      # Gate: a tag that fails tests does not ship.
+      - run: npm run check
+      # Provenance attests against the public repo URL (package.json repository).
+      # No --access flag: publishConfig.access in package.json ("public") wins,
+      # so anyone can add @lunaroute/opencode-extension to their opencode.json
+      # plugin array.
+      # Prerelease versions (0.1.0-beta.1) auto-publish to the `beta` dist-tag;
+      # stable (0.1.0) to `latest`.
+      - run: npm publish --provenance
