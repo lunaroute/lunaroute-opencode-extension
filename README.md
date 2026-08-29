@@ -53,8 +53,9 @@ Then in OpenCode:
 Choose **LunaRoute**, then **Log in with browser** (a browser opens to
 `https://app.lunaroute.com/device-auth/opencode`; after you approve, an API
 key is issued and stored) or **Paste an API key** (paste an existing `lr_...`
-key). After login, the first LunaRoute model is picked as your default —
-run `/models` only if you want to choose a different one.
+key). If you haven't already set a default model, the first LunaRoute model
+is picked for you — run `/models` only if you want to choose a different
+one.
 
 ## LunaRoute MCP tools
 
