@@ -24,7 +24,7 @@ export type TestClient = {
   config: {
     // get() may return the wrapped `{ data }` shape or the flat config object
     // directly — not spike-verified which, so the read is shape-tolerant.
-    get(): Promise<{ data?: { model?: string }; model?: string }>;
+    get(): Promise<{ data?: { model?: string; provider?: unknown }; model?: string; provider?: unknown }>;
     update(body: { config: { model: string } }): Promise<unknown>;
   };
 };
@@ -68,11 +68,16 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir();
   const sessionId = generateSessionId();
-  const routingUrl = resolveRoutingUrl(env);
+  const envRoutingUrl = resolveRoutingUrl(env);
+  // One effective routing URL for every consumer (catalog, model api.url, paste
+  // validation, auto-pick): user-set provider.lunaroute.options.baseURL wins over
+  // the env URL — spec "Base URL precedence". Updated by the config hook after
+  // stub injection reads it back; consumers outside the hook read this variable.
+  let effectiveRoutingUrl = envRoutingUrl;
   const mcpUrl = resolveMcpUrl(env);
   const log: PluginLog = deps.log ?? (() => {});
   const reconciler = createMcpReconciler(mcpUrl, log, sessionId);
-  const catalogMemo = createCatalogMemo((key) => fetchCatalog(routingUrl, key, sessionId));
+  const catalogMemo = createCatalogMemo((url, key) => fetchCatalog(url, key, sessionId));
   let firstRunHintShown = false;
 
   return async (input) => {
@@ -82,6 +87,15 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
     /** Resolve the current default model from either SDK get() shape (wrapped or flat). */
     const currentModelOf = (cfg: { data?: { model?: string }; model?: string } | undefined | null): string | undefined =>
       cfg?.data?.model ?? cfg?.model;
+
+    /** User-configured provider baseURL from either SDK get() shape — the same shape tolerance as currentModelOf. */
+    const providerBaseUrlOf = (provider: unknown): string | undefined => {
+      const base = (provider as { lunaroute?: { options?: { baseURL?: unknown } } } | null | undefined)?.lunaroute?.options?.baseURL;
+      return typeof base === "string" && base ? base : undefined;
+    };
+    const effectiveBaseUrlOf = (
+      cfg: { data?: { provider?: unknown }; provider?: unknown } | undefined | null,
+    ): string | undefined => providerBaseUrlOf(cfg?.data?.provider) ?? providerBaseUrlOf(cfg?.provider);
 
     /**
      * Post-login default-model pick. The ONLY config write the plugin ever
@@ -94,9 +108,10 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
       try {
         const client = clientOf(runtime);
         if (!client) return;
-        const current = currentModelOf(await client.config.get());
+        const fetched = await client.config.get();
+        const current = currentModelOf(fetched);
         if (current) return;
-        const catalog = await catalogMemo(key);
+        const catalog = await catalogMemo(effectiveBaseUrlOf(fetched) ?? effectiveRoutingUrl, key);
         if ("error" in catalog) {
           log("warn", `LunaRoute: post-login catalog fetch failed: ${catalog.error}`);
           return;
@@ -116,7 +131,13 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
       config: async (cfg: Record<string, unknown>, runtime?: PluginRuntime) => {
         // Contributor 1: provider stub — always lands, individually isolated.
         try {
-          injectProviderStub(cfg, routingUrl);
+          injectProviderStub(cfg, envRoutingUrl);
+          // Read the effective URL back: user-set baseURL or the env fallback
+          // just injected — every later consumer in this hook uses this value.
+          const stub = (cfg.provider as Record<string, { options?: { baseURL?: unknown } }> | undefined)?.lunaroute;
+          if (typeof stub?.options?.baseURL === "string" && stub.options.baseURL) {
+            effectiveRoutingUrl = stub.options.baseURL;
+          }
         } catch (err) {
           log("warn", `LunaRoute: provider stub injection failed: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -126,7 +147,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
           const resolution = await resolveAuthState(storeKey, runtime?.fs);
           try {
             if (resolution.state === "valid") {
-              const result = await catalogMemo(resolution.key);
+              const result = await catalogMemo(effectiveRoutingUrl, resolution.key);
               if ("error" in result) {
                 log("warn", `LunaRoute: catalog fetch failed: ${result.error}`);
               } else {
@@ -134,7 +155,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
                 if (result.skipped.length && !result.models.length) {
                   log("warn", `LunaRoute: catalog had ${result.skipped.length} invalid entries, all skipped`);
                 }
-                injectModels(cfg, result.models, routingUrl);
+                injectModels(cfg, result.models, effectiveRoutingUrl);
               }
             } else if (resolution.state === "logged-out" && !firstRunHintShown) {
               firstRunHintShown = true;
@@ -158,6 +179,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
         env,
         log,
         sessionId,
+        resolveRoutingUrl: () => effectiveRoutingUrl,
         onLoginSuccess: (key) => {
           void postLoginRefresh(key);
         },

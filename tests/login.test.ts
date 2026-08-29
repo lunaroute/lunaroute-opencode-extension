@@ -190,6 +190,16 @@ describe("paste method", () => {
     const init = fetchMock.mock.calls[0][1] as { headers: Record<string, string> };
     expect(init.headers).toEqual({ Authorization: "Bearer lr_good" });
   });
+  it("validates against the resolver-provided effective URL when given", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
+    const { auth } = makeAuth({
+      resolveRoutingUrl: () => "http://effective/v1",
+      deps: { fetch: fetchMock as unknown as typeof fetch },
+    });
+    const res = await apiOf(auth).authorize({ api_key: "lr_good" });
+    expect(res).toEqual({ type: "success", key: "lr_good" });
+    expect(fetchMock).toHaveBeenCalledWith("http://effective/v1/models", expect.anything());
+  });
   it("fails on bad shape without touching the network", async () => {
     const fetchMock = vi.fn();
     const { auth } = makeAuth({ deps: { fetch: fetchMock as unknown as typeof fetch } });

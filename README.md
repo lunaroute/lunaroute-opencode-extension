@@ -100,6 +100,10 @@ for dev/staging via environment variables before starting OpenCode:
 | `LUNAROUTE_FRONT_URL` | `https://app.lunaroute.com` | Web app host for `/device-auth/opencode` browser login |
 | `LUNAROUTE_MCP_URL` | `https://mcp.lunaroute.com/mcp` | Hosted MCP server URL registered in the live config |
 
+Setting `provider.lunaroute.options.baseURL` in your OpenCode config takes
+precedence over `LUNAROUTE_ROUTING_URL` everywhere (chat, model catalog,
+key validation) — one effective URL for all of them.
+
 ## Troubleshooting
 
 - **No models appear after login**: the gateway may be unreachable, or the

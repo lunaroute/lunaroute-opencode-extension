@@ -101,6 +101,9 @@ export function createLunarouteAuth(opts: {
   onLoginSuccess?: (key: string) => void;
   log?: AuthLog;
   sessionId?: string;
+  /** Effective routing URL for paste-key validation — the plugin passes its
+   * user-baseURL-aware effective URL; defaults to the env-derived URL. */
+  resolveRoutingUrl?: () => string;
   deps?: LoginDeps;
 }): AuthHook {
   const log = opts.log ?? (() => {});
@@ -192,7 +195,8 @@ export function createLunarouteAuth(opts: {
           const key = inputs?.api_key;
           if (!isValidCredentialShape(key)) return fail();
           try {
-            const res = await d.fetch(`${resolveRoutingUrl(opts.env)}/models`, {
+            const routingUrl = opts.resolveRoutingUrl?.() ?? resolveRoutingUrl(opts.env);
+            const res = await d.fetch(`${routingUrl}/models`, {
               headers: {
                 Authorization: `Bearer ${key}`,
                 ...(opts.sessionId ? buildAttributionHeaders(opts.sessionId) : {}),

@@ -81,15 +81,20 @@ export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: st
   providers[LUNAROUTE_PROVIDER] = provider;
 }
 
-/** Per-process per-credential memo: concurrent callers share one in-flight fetch;
+/** Per-process per-(URL, credential) memo: concurrent callers share one in-flight fetch;
  * a SUCCESSFUL result is reused for later same-key calls (config hook runs multiple
- * times per process); a FAILED result is never cached — the next call retries. */
-export function createCatalogMemo(fetchFor: (key: string) => Promise<CatalogResult>): (key: string) => Promise<CatalogResult> {
+ * times per process); a FAILED result is never cached — the next call retries.
+ * The URL is part of the key so a user changing provider.lunaroute.options.baseURL
+ * between hook runs gets a fresh catalog, not the other endpoint's. */
+export function createCatalogMemo(
+  fetchFor: (url: string, key: string) => Promise<CatalogResult>,
+): (url: string, key: string) => Promise<CatalogResult> {
   const cache = new Map<string, Promise<CatalogResult>>();
-  return (k: string) => {
+  return (url: string, key: string) => {
+    const k = `${url}\n${key}`;
     let entry = cache.get(k);
     if (!entry) {
-      entry = fetchFor(k).then(
+      entry = fetchFor(url, key).then(
         (result) => {
           if ("error" in result) cache.delete(k); // failure: do not cache
           return result;

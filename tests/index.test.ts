@@ -67,6 +67,40 @@ describe("config hook", () => {
     }
   });
 
+  it("user-set baseURL wins: catalog fetched from and models pointed at the user URL", async () => {
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: "m-1" }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { plugin } = makePlugin();
+      const hooks = await plugin({});
+      const cfg: Record<string, unknown> = { provider: { lunaroute: { options: { baseURL: "http://proxy/v9" } } } };
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      expect(fetchMock).toHaveBeenCalledWith("http://proxy/v9/models", expect.anything());
+      const models = providerOf(cfg).models as Record<string, { api: { url: string } }>;
+      expect(models["m-1"].api.url).toBe("http://proxy/v9");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("memo is URL-sensitive: same credential under a changed effective URL refetches", async () => {
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: "m-1" }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { plugin } = makePlugin();
+      const hooks = await plugin({});
+      await hooks.config({ provider: { lunaroute: { options: { baseURL: "http://a/v1" } } } }, { storeKey: AUTH_PATH, fs });
+      await hooks.config({ provider: { lunaroute: { options: { baseURL: "http://b/v1" } } } }, { storeKey: AUTH_PATH, fs });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenNthCalledWith(1, "http://a/v1/models", expect.anything());
+      expect(fetchMock).toHaveBeenNthCalledWith(2, "http://b/v1/models", expect.anything());
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("logged out: provider stub only — no models, no MCP, fetch untouched, one first-run hint", async () => {
     const fs = fsWith(undefined); // readable store, no lunaroute entry
     const fetchMock = vi.fn();
@@ -153,6 +187,59 @@ describe("post-login model auto-pick", () => {
     const configUpdate = vi.fn();
     return { client: { config: { get: configGet, update: configUpdate } } as unknown as TestClient, configUpdate };
   };
+
+  it("paste validation follows the config-derived effective URL", async () => {
+    // After a config run with a user baseURL, the paste method must validate
+    // against that URL — not the env-derived gateway.
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: "m-1" }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { plugin } = makePlugin();
+      const hooks = await plugin({});
+      await hooks.config({ provider: { lunaroute: { options: { baseURL: "http://proxy/v9" } } } }, { storeKey: AUTH_PATH, fs });
+      fetchMock.mockClear();
+      await apiOf(hooks).authorize({ api_key: "lr_good" });
+      expect(fetchMock).toHaveBeenCalledWith("http://proxy/v9/models", expect.anything());
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("auto-pick catalog fetch uses the config's provider baseURL (wrapped get() shape)", async () => {
+    const configGet = vi.fn().mockResolvedValue({ data: { provider: { lunaroute: { options: { baseURL: "http://cfg/v1" } } } } });
+    const { client, configUpdate } = makeClient(configGet);
+    const { plugin } = makePlugin({ client });
+    const fetchMock = catalogFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const hooks = await plugin({ client });
+    try {
+      await apiOf(hooks).authorize({ api_key: "lr_good" });
+      await flush();
+      // Call 1: paste validation (no config run yet → env URL). Call 2: auto-pick catalog fetch (config baseURL).
+      expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["http://gw/v1/models", "http://cfg/v1/models"]);
+      expect(configUpdate).toHaveBeenCalledWith({ config: { model: "lunaroute/m-1" } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("auto-pick catalog fetch uses the config's provider baseURL (flat get() shape)", async () => {
+    const configGet = vi.fn().mockResolvedValue({ provider: { lunaroute: { options: { baseURL: "http://flat/v1" } } } });
+    const { client, configUpdate } = makeClient(configGet);
+    const { plugin } = makePlugin({ client });
+    const fetchMock = catalogFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const hooks = await plugin({ client });
+    try {
+      await apiOf(hooks).authorize({ api_key: "lr_good" });
+      await flush();
+      expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["http://gw/v1/models", "http://flat/v1/models"]);
+      expect(configUpdate).toHaveBeenCalledWith({ config: { model: "lunaroute/m-1" } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("writes exactly { model } when unset", async () => {
     const configGet = vi.fn().mockResolvedValue({ data: {} });

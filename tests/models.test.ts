@@ -77,11 +77,11 @@ describe("createCatalogMemo", () => {
   it("shares one in-flight fetch for concurrent same-key calls; success is reused sequentially", async () => {
     let calls = 0;
     const slow = async () => { calls++; await new Promise((r) => setTimeout(r, 20)); return { ok: true, json: async () => ({ data: [{ id: "m" }] }) }; };
-    const memo = createCatalogMemo((k) => fetchCatalog("http://gw/v1", k, "sess-1", { fetch: slow as never }));
-    const [a, b] = await Promise.all([memo("k"), memo("k")]);
+    const memo = createCatalogMemo((url, k) => fetchCatalog(url, k, "sess-1", { fetch: slow as never }));
+    const [a, b] = await Promise.all([memo("http://gw/v1", "k"), memo("http://gw/v1", "k")]);
     expect(calls).toBe(1);
     expect(a).toEqual(b);
-    const c = await memo("k"); // sequential reuse — no third fetch
+    const c = await memo("http://gw/v1", "k"); // sequential reuse — no third fetch
     expect(calls).toBe(1);
     expect(c).toEqual(a);
   });
@@ -89,13 +89,23 @@ describe("createCatalogMemo", () => {
     let calls = 0;
     let fail = true;
     const flaky = async () => { calls++; if (fail) throw new Error("boom"); return { ok: true, json: async () => ({ data: [{ id: "m" }] }) }; };
-    const memo = createCatalogMemo((k) => fetchCatalog("http://gw/v1", k, "sess-1", { fetch: flaky as never }));
-    await memo("k"); // fails
+    const memo = createCatalogMemo((url, k) => fetchCatalog(url, k, "sess-1", { fetch: flaky as never }));
+    await memo("http://gw/v1", "k"); // fails
     fail = false;
-    const r = await memo("k"); // retries — failure was not cached
+    const r = await memo("http://gw/v1", "k"); // retries — failure was not cached
     expect(calls).toBe(2);
     expect(r).toHaveProperty("models");
-    await memo("other"); // different key → refetch
+    await memo("http://gw/v1", "other"); // different key → refetch
     expect(calls).toBe(3);
+  });
+  it("same credential, different URL → refetch (not the cached other-URL result)", async () => {
+    let calls = 0;
+    const f = async () => { calls++; return { ok: true, json: async () => ({ data: [{ id: "m" }] }) }; };
+    const memo = createCatalogMemo((url, k) => fetchCatalog(url, k, "sess-1", { fetch: f as never }));
+    await memo("http://a/v1", "k");
+    await memo("http://b/v1", "k"); // same credential, new URL → fresh fetch
+    expect(calls).toBe(2);
+    await memo("http://a/v1", "k"); // the original (URL, credential) pair is still cached
+    expect(calls).toBe(2);
   });
 });
