@@ -1835,7 +1835,7 @@ export default createLunaroutePlugin();
 ### Task 9: README + smoke checklist + secret-lifecycle verification
 
 **Files:**
-- Create: `README.md`, `docs/smoke-checklist.md`
+- Create: `README.md`, `docs/smoke-checklist.md`, `LICENSE` (MIT, copyright LunaRoute — closes the gap flagged in Task 2's review)
 - Modify: none in src
 
 **Interfaces:**
