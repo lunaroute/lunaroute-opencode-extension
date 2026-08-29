@@ -1,2 +1,6 @@
+node_modules/
+.kata.local.toml
+.worktrees/
+.superpowers/
 # roborev snapshots
 /.roborev/

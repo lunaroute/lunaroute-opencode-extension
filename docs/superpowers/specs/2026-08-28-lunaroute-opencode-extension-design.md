@@ -1,8 +1,25 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 16 — after fifteenth review; normative logging rule, lexical store key)
-Status: revised per design review findings
+Date: 2026-08-28 (rev 16 + spike amendment — see below)
+Status: revised per design review findings; **amended by the compatibility spike**
 Kata: (created at implementation)
+
+> **Spike amendment (2026-08-29, docs/compatibility-spike.md):** the plugin
+> `provider` hook **never fires for custom config-declared providers**
+> (verified in OpenCode source + empirically on 1.14.49/1.18.25 — the hook
+> loop gates on the models.dev database before config providers merge).
+> Every "provider hook" mechanism below is therefore superseded by
+> **config-hook model injection**: the config hook fetches the catalog with
+> the key from tri-state auth resolution and injects
+> `provider.lunaroute.models` (the community pattern). The `provider` hook
+> is dropped from the plugin. Wherever this document says "provider hook",
+> read "config-hook injection"; availability retries at the next
+> config-hook run (instance reload/restart), not the next `/models` open.
+> Post-login: the `{ model }` auto-pick PATCH triggers instance reload
+> (spike gate (a) = yes), which re-runs the config hook with the fresh key —
+> models appear after login without a manual restart. When logged in, the
+> fetched catalog replaces `provider.lunaroute.models` (catalog is the
+> source of truth); logged out, any user-set models are preserved.
 
 ## Goal
 
