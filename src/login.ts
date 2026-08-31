@@ -19,6 +19,11 @@ import {
 
 const LOGIN_TIMEOUT_MS = 3 * 60_000;
 
+/** The remote-browser method never listens on a loopback, but DeviceAuthPage
+ * only enables approval for a plausible port (1024–65535) and uses it to
+ * build the callback URL the user pastes back — so pass a fixed valid one. */
+const REMOTE_BROWSER_CALLBACK_PORT = 45117;
+
 export type LoopbackServer = {
   port: number;
   waitForCallback(): Promise<{ code: string; state: string }>;
@@ -165,6 +170,9 @@ export function createLunarouteAuth(opts: {
                 });
                 return succeed(result.full_key);
               } catch (err) {
+                if (err instanceof Error && err.message.includes("timed out")) {
+                  log("info", "If your browser is on a different machine, re-run and choose 'Log in from a remote browser'.");
+                }
                 log(
                   "warn",
                   `LunaRoute browser login error: ${err instanceof Error ? err.message : String(err)}`,
@@ -173,6 +181,57 @@ export function createLunarouteAuth(opts: {
               } finally {
                 if (timer) clearTimeout(timer);
                 server.close();
+              }
+            },
+          };
+        },
+      },
+      {
+        type: "oauth",
+        label: "Log in from a remote browser",
+        authorize: async () => {
+          // Same PKCE machinery as the browser method, but no loopback server:
+          // the browser is on another machine, so nothing on this host listens.
+          const verifier = d.verifier();
+          const challenge = computePkceChallenge(verifier);
+          const state = d.state();
+          const url = buildDeviceAuthUrl(
+            resolveFrontUrl(opts.env),
+            REMOTE_BROWSER_CALLBACK_PORT,
+            state,
+            challenge,
+          );
+          return {
+            url,
+            instructions:
+              "Open the URL in any browser and approve. You'll be redirected to a 127.0.0.1 address that fails to load — that's expected. Paste that full URL (or its ?code=...&state=... part) back here.",
+            method: "code" as const,
+            callback: async (pasted: string): Promise<{ type: "success"; key: string } | { type: "failed" }> => {
+              try {
+                const trimmed = pasted.trim();
+                if (!trimmed) return fail();
+                // Accept a full callback URL or a bare "code=..&state=.." query string.
+                const normalized = /^https?:/i.test(trimmed)
+                  ? trimmed
+                  : `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
+                const cb = parseCallbackQuery(normalized);
+                if (!cb.code) return fail();
+                if (cb.state !== state) {
+                  log("warn", "LunaRoute remote-browser login failed: state mismatch");
+                  return fail();
+                }
+                const result = await d.exchange(resolveApiUrl(opts.env), {
+                  code: cb.code,
+                  verifier,
+                  label: hostname(),
+                });
+                return succeed(result.full_key);
+              } catch (err) {
+                log(
+                  "warn",
+                  `LunaRoute remote-browser login error: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                return fail();
               }
             },
           };

@@ -20,10 +20,19 @@ type StartedBrowserFlow = {
   callback(): Promise<AuthResult>;
 };
 type OAuthMethod = { type: "oauth"; label: string; authorize(): Promise<StartedBrowserFlow> };
+type StartedCodeFlow = {
+  url: string;
+  instructions: string;
+  method: "code";
+  callback(pasted: string): Promise<AuthResult>;
+};
+type CodeMethod = { type: "oauth"; label: string; authorize(): Promise<StartedCodeFlow> };
 type ApiMethod = { type: "api"; label: string; authorize(inputs?: Record<string, string>): Promise<AuthResult> };
 
 const oauthOf = (auth: AuthHook): OAuthMethod =>
   auth.methods.find((m) => m.type === "oauth") as unknown as OAuthMethod;
+const remoteOf = (auth: AuthHook): CodeMethod =>
+  auth.methods.find((m) => m.type === "oauth" && m.label === "Log in from a remote browser") as unknown as CodeMethod;
 const apiOf = (auth: AuthHook): ApiMethod =>
   auth.methods.find((m) => m.type === "api") as unknown as ApiMethod;
 
@@ -38,12 +47,13 @@ function makeAuth(overrides: Partial<Parameters<typeof createLunarouteAuth>[0]> 
       LUNAROUTE_ROUTING_URL: "http://gw/v1",
     },
     onLoginSuccess,
+    ...overrides,
     deps: {
       verifier: () => "v".repeat(64),
       state: () => "st-1",
       exchange: async () => goodExchange,
+      ...overrides.deps,
     },
-    ...overrides,
   });
   return { auth, onLoginSuccess };
 }
@@ -146,6 +156,86 @@ describe("browser method (full flow)", () => {
       await expect(promise).resolves.toEqual({ type: "failed" });
       expect(close).toHaveBeenCalled();
       expect(onLoginSuccess).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("remote-browser method (pi #6 parity)", () => {
+  it("authorize returns a code-method URL with a plausible port; a pasted full callback URL completes the exchange without any loopback", async () => {
+    const startLoopback = vi.fn();
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth, onLoginSuccess } = makeAuth({
+      deps: { startLoopback: startLoopback as never, exchange: exchange as never },
+    });
+    const started = await remoteOf(auth).authorize();
+    expect(started.method).toBe("code");
+    expect(started.url).toMatch(/^http:\/\/front\/device-auth\/opencode\?port=\d+&state=st-1&challenge=/);
+    expect(Number(new URL(started.url).searchParams.get("port"))).toBeGreaterThanOrEqual(1024);
+    const result = await started.callback("http://127.0.0.1:45117/callback?code=raw-code&state=st-1");
+    expect(result).toEqual({ type: "success", key: "lr_new" });
+    expect(onLoginSuccess).toHaveBeenCalledWith("lr_new");
+    expect(exchange).toHaveBeenCalledWith(
+      "http://api",
+      expect.objectContaining({ code: "raw-code", verifier: "v".repeat(64) }),
+    );
+    expect(startLoopback).not.toHaveBeenCalled();
+  });
+
+  it("accepts a bare query string (with or without a leading ?) identically", async () => {
+    const { auth } = makeAuth({ deps: { exchange: async () => goodExchange } });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("code=raw-code&state=st-1")).toEqual({ type: "success", key: "lr_new" });
+    expect(await started.callback("?code=raw-code&state=st-1")).toEqual({ type: "success", key: "lr_new" });
+  });
+
+  it("state mismatch fails with the specific warn log and no exchange", async () => {
+    const logs: { level: string; message: string }[] = [];
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth, onLoginSuccess } = makeAuth({
+      log: (level, message) => logs.push({ level, message }),
+      deps: { exchange: exchange as never },
+    });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("http://127.0.0.1:45117/callback?code=raw-code&state=WRONG")).toEqual({
+      type: "failed",
+    });
+    expect(exchange).not.toHaveBeenCalled();
+    expect(onLoginSuccess).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.message === "LunaRoute remote-browser login failed: state mismatch")).toBe(true);
+  });
+
+  it("malformed paste (no code) fails without throwing", async () => {
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth } = makeAuth({ deps: { exchange: exchange as never } });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("not a url at all")).toEqual({ type: "failed" });
+    expect(await started.callback("")).toEqual({ type: "failed" });
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
+  it("browser-method timeout logs the info hint pointing at the remote-browser method", async () => {
+    vi.useFakeTimers();
+    try {
+      const logs: { level: string; message: string }[] = [];
+      const fakeServer: LoopbackServer = {
+        port: 39999,
+        waitForCallback: () => new Promise(() => {}),
+        close: () => {},
+      };
+      const { auth } = makeAuth({
+        log: (level, message) => logs.push({ level, message }),
+        deps: { startLoopback: async () => fakeServer },
+      });
+      const started = await oauthOf(auth).authorize();
+      const promise = started.callback();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 10);
+      await expect(promise).resolves.toEqual({ type: "failed" });
+      const hint = logs.find(
+        (l) => l.level === "info" && l.message.includes("Log in from a remote browser"),
+      );
+      expect(hint).toBeDefined();
     } finally {
       vi.useRealTimers();
     }

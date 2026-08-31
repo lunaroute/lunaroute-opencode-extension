@@ -57,6 +57,11 @@ key). If you haven't already set a default model, the first LunaRoute model
 is picked for you — run `/models` only if you want to choose a different
 one.
 
+On a headless machine (or when your browser is on another computer), choose
+**Log in from a remote browser** instead: open the URL it shows in any
+browser, approve there, and paste the redirect URL it lands on (it will
+fail to load — that's expected) back into OpenCode.
+
 ## LunaRoute MCP tools
 
 When you are logged in, the extension registers the hosted LunaRoute MCP
