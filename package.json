@@ -1,6 +1,6 @@
 {
   "name": "@lunaroute/opencode-extension",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode plugin for LunaRoute: /connect login, model sync, attribution, and hosted MCP.",
   "type": "module",
   "main": "./src/index.ts",
