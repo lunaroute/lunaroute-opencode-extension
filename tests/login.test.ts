@@ -67,6 +67,8 @@ describe("loopback server", () => {
     const server = await startLoopbackServer();
     const res1 = await fetch(`http://127.0.0.1:${server.port}/callback?code=c&state=s`);
     expect(res1.status).toBe(200);
+    // kata y992: the approval page verifies delivery via cors fetch + res.ok.
+    expect(res1.headers.get("access-control-allow-origin")).toBe("*");
     await fetch(`http://127.0.0.1:${server.port}/callback?code=c2&state=s2`); // resolves a settled promise: no-op
     expect(await server.waitForCallback()).toEqual({ code: "c", state: "s" });
     server.close();
