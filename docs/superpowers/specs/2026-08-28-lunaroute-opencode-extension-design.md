@@ -1,6 +1,6 @@
 # LunaRoute OpenCode Extension — Design
 
-Date: 2026-08-28 (rev 16 + spike amendment — see below)
+Date: 2026-08-28 (rev 17 + spike amendment — see below)
 Status: revised per design review findings; **amended by the compatibility spike**
 Kata: (created at implementation)
 
@@ -20,6 +20,33 @@ Kata: (created at implementation)
 > models appear after login without a manual restart. When logged in, the
 > fetched catalog replaces `provider.lunaroute.models` (catalog is the
 > source of truth); logged out, any user-set models are preserved.
+>
+> **Rev 17 amendment (2026-09-11, kata dpd0 — pre-login placeholder
+> model):** OpenCode (verified 1.14.49 → 1.18.30 and on current dev)
+> deletes any zero-model provider from provider state, which removed
+> config-only LunaRoute from `/connect` before first login. New normative
+> rule for the models contributor, refining "logged out ⇒ preserve" for
+> the empty case:
+>
+> **Auth resolution ≠ `valid` AND `provider.lunaroute` has no models ⇒
+> inject one placeholder model** — id `login`, name "Log in to load
+> models", `status: "active"`, `api.url` = effective routing URL, built
+> through `toProviderModels` (identical `ModelV2` shape to catalog
+> entries). Additive-only: existing models (user-written or catalog) are
+> never touched; the post-login catalog replaces the placeholder
+> wholesale. It applies in **both** non-valid states — logged-out and
+> indeterminate (indeterminate is when a login path matters most;
+> re-running `/connect` rewrites a malformed credential). The `valid`
+> state is excluded: a transient catalog failure while logged in must not
+> present a "log in" label to a logged-in user. Known, accepted
+> limitations: the placeholder is visible in `/models` pre-login (no
+> hiding mechanism exists — deprecated/alpha placeholders are deleted
+> server-side, which re-drops the provider); selecting it pre-login
+> surfaces the gateway's raw 401 (the label is the guidance; no clean
+> plugin-side abort exists). Injection is silent — the first-run hint and
+> the normative indeterminate logging rules are unchanged. Sunset: if
+> upstream ever lists zero-model providers in `/connect`, the placeholder
+> becomes redundant-but-harmless; remove it in a later minor.
 
 ## Goal
 
