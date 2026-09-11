@@ -526,8 +526,10 @@ describe("settings: MCP toggle + malformed-file warn (kata f2aj)", () => {
       await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
       // defaults behavior: mcp on → entry injected
       expect(mcpOf(cfg).headers["LUNAROUTE-API-KEY"]).toBe("lr_good");
-      // warn from the config hook's reader (the web-tools gate warns too)
-      expect(logs.some((l) => l.level === "warn" && /settings file is not valid JSON/.test(l.message))).toBe(true);
+      // exactly ONE warn for the malformed file (deduped per process by
+      // reason — the web-tools gate re-reads it but must not re-warn)
+      expect(logs.filter((l) => l.level === "warn" && /settings file/.test(l.message))).toHaveLength(1);
+      expect(logs.some((l) => /settings file is not valid JSON/.test(l.message))).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

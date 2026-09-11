@@ -94,6 +94,16 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
   // through this ref.
   const noopLog: PluginLog = () => {};
   const logRef = { current: deps.log ?? noopLog };
+  // Invalid-settings warnings are deduped per process by reason: the same
+  // malformed file is re-read by every consumer (config hook, web-tools gate,
+  // per-execute provider resolution) — warn once per distinct reason, not per
+  // read (a changed failure mode re-warns).
+  let lastSettingsWarnReason: string | undefined;
+  const onInvalidSettings = (reason: string): void => {
+    if (reason === lastSettingsWarnReason) return;
+    lastSettingsWarnReason = reason;
+    logRef.current("warn", `LunaRoute: ${reason}`);
+  };
   const reconciler = createMcpReconciler(mcpUrl, (level, message) => logRef.current(level, message), sessionId);
   const catalogMemo = createCatalogMemo((url, key) => fetchCatalog(url, key, sessionId));
   let firstRunHintShown = false;
@@ -176,7 +186,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
         sessionId,
         log,
         resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
-        readSettingsNow: () => readSettings(env, home, undefined, (reason) => log("warn", `LunaRoute: ${reason}`)),
+        readSettingsNow: () => readSettings(env, home, undefined, onInvalidSettings),
       });
     } catch (err) {
       log("warn", `LunaRoute: web tools registration failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -235,7 +245,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
             // our tests). The mcp.lunaroute entry is per-instance live config:
             // after a reload (restart or any PATCH-triggered apply) the new
             // instance simply never gets it.
-            const settings = readSettings(env, home, undefined, (reason) => log("warn", `LunaRoute: ${reason}`));
+            const settings = readSettings(env, home, undefined, onInvalidSettings);
             if (mcpEnabled(settings)) {
               reconciler.reconcile(cfg, resolution, storeKey);
             }
