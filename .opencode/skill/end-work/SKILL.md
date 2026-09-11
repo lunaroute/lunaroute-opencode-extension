@@ -64,8 +64,10 @@ Only after main is green:
 
 ```bash
 kata close <ref> --done --message "<scope + how main was verified>" --commit <squash-sha>
-cd <repo-root>   # leave the worktree first
-rm -f .worktrees/<ref>-<slug>.lock   # release the liveness lock (see begin-work step 2)
+# main checkout root — the lock lives there, not inside the worktree (see begin-work step 2)
+main_root="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+cd "$main_root"   # leave the worktree first
+rm -f .worktrees/<ref>-<slug>.lock   # release the liveness lock
 git worktree remove .worktrees/<ref>-<slug>
 git branch -D <ref>-<slug>
 git pull
