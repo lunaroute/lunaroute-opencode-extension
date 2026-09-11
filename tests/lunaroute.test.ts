@@ -121,6 +121,36 @@ describe("catalog mapping", () => {
     if (!r.ok) throw new Error("expected ok");
     expect(r.model.name).toBe("x");
   });
+  // Non-chat capability families are tagged by the gateway on capabilities (pi gx0e + p4eh
+  // parity): image_generation (flux2-klein & co), embeddings (emb-granite, emb-nomic-code,
+  // emb-nomic-moe, emb-qwen3), rerank (bge-rr-v2-m3). They must never surface as chat models.
+  it("skips image-generation models with a typed non-chat reason (live-catalog shape)", () => {
+    expect(mapCatalogEntry({ id: "flux2-klein", display_name: "Flux 2 Klein", capabilities: { image_generation: true, tools: true } }))
+      .toEqual({ ok: false, reason: "non_chat_capability (image_generation)" });
+  });
+  it("skips embedding models with a typed non-chat reason (live-catalog shape)", () => {
+    expect(mapCatalogEntry({ id: "emb-nomic-code", display_name: "emb-nomic-code", context_window: 8192, capabilities: { embeddings: true } }))
+      .toEqual({ ok: false, reason: "non_chat_capability (embeddings)" });
+  });
+  it("skips reranking models with a typed non-chat reason (live-catalog shape)", () => {
+    expect(mapCatalogEntry({ id: "bge-rr-v2-m3", display_name: "bge-rr-v2-m3", context_window: 8192, capabilities: { rerank: true } }))
+      .toEqual({ ok: false, reason: "non_chat_capability (rerank)" });
+  });
+  it("non-chat check takes precedence: an image model with reasoning:true never surfaces as a chat model", () => {
+    const r = mapCatalogEntry({ id: "weird", capabilities: { image_generation: true, reasoning: true } });
+    expect(r).toEqual({ ok: false, reason: "non_chat_capability (image_generation)" });
+  });
+  it("explicit false and absent capabilities still map as chat models", () => {
+    for (const caps of [
+      { image_generation: false, embeddings: false, rerank: false },
+      { reasoning: true, vision: true },
+      undefined,
+    ]) {
+      const r = mapCatalogEntry({ id: "x", capabilities: caps });
+      if (!r.ok) throw new Error("expected ok");
+      expect(r.model.id).toBe("x");
+    }
+  });
 });
 
 describe("mapCatalog", () => {
@@ -133,6 +163,20 @@ describe("mapCatalog", () => {
     expect(skipped).toEqual([
       { id: "dup", reason: "duplicate id" },
       { id: "(unidentifiable entry)", reason: "not an object" },
+    ]);
+  });
+  it("mixed catalog: non-chat families are excluded from models and recorded as typed skips", () => {
+    const { models, skipped } = mapCatalog([
+      { id: "gpt-x", display_name: "GPT X", capabilities: { reasoning: true } },
+      { id: "flux2-klein", capabilities: { image_generation: true } },
+      { id: "emb-granite", capabilities: { embeddings: true } },
+      { id: "bge-rr-v2-m3", capabilities: { rerank: true } },
+    ]);
+    expect(models.map((m) => m.id)).toEqual(["gpt-x"]);
+    expect(skipped).toEqual([
+      { id: "flux2-klein", reason: "non_chat_capability (image_generation)" },
+      { id: "emb-granite", reason: "non_chat_capability (embeddings)" },
+      { id: "bge-rr-v2-m3", reason: "non_chat_capability (rerank)" },
     ]);
   });
 });
