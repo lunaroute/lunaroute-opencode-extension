@@ -42,6 +42,22 @@ Where to look:
   `<staging front>/device-auth/opencode` → approve → OpenCode reports
   success and the key lands in auth.json only.
 
+## Pre-login onboarding (dpd0)
+
+- [ ] **P1 — `/connect` lists LunaRoute before first login.** Fresh machine
+  state (no `lunaroute` entry in auth.json, plugin-only config): open the
+  TUI, run `/connect` — LunaRoute must appear in the provider list;
+  selecting it must show the three login methods.
+- [ ] **P2 — `/models` pre-login shows exactly one LunaRoute entry:**
+  "Log in to load models" (the placeholder), no catalog entries.
+- [ ] **P3 — Placeholder replaced after login.** Complete the login (see
+  0b): `/models` shows the real catalog, "Log in to load models" is gone,
+  and the post-login default-model auto-pick still lands on a real model.
+- [ ] **P4 — User-set models are never clobbered.** With
+  `provider.lunaroute.models` hand-written in opencode.json and logged
+  out: restart — the hand-written models survive unchanged and no
+  placeholder is added.
+
 ## Spec acceptance criteria
 
 - [ ] **1 — `/connect` browser flow + rotation.** Browser flow completes;
@@ -60,10 +76,15 @@ Where to look:
 - [ ] **4 — Revoked key.** Revoke the staging key server-side, then open
   `/models`: no LunaRoute models (fetch 401 → empty list, no crash); chat
   with a previously-selected model fails with the gateway's 401 surfaced
-  by OpenCode — no silent use of an empty model.
+  by OpenCode — no silent use of an empty model. Note: with a shape-valid
+  but dead credential, `/connect` may not list LunaRoute (zero models,
+  valid state — no placeholder by design); re-auth via
+  `opencode providers login --provider lunaroute`.
 - [ ] **5 — Logged out entirely.** Remove the `lunaroute` entry from
-  auth.json and restart OpenCode: no `mcp.lunaroute` in the live config, no
-  LunaRoute models, one info log line ("Run /connect..."), no errors.
+  auth.json and restart OpenCode: no `mcp.lunaroute` in the live config,
+  no catalog models (exactly the "Log in to load models" placeholder
+  remains, and `/connect` still lists LunaRoute), one info log line ("Run
+  /connect..."), no errors.
 - [ ] **6 — Install from the packed tarball.** `npm pack`, then install the
   tarball into a fresh OpenCode (config `plugin` array pointing at the
   tarball path) — not a repo checkout. The plugin loads and `/connect`

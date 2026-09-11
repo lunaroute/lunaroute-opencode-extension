@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createCatalogMemo, fetchCatalog, injectModels, injectProviderStub, toProviderModels } from "../src/models.js";
+import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub, toProviderModels } from "../src/models.js";
 import type { MappedModel } from "../src/lunaroute.js";
 
 const mk = (id: string): MappedModel => ({ id, name: id, reasoning: false, tool_call: true, attachment: false, limitContext: 64000, limitOutput: 4096, modalitiesInput: ["text"], variants: {} });
@@ -70,6 +70,48 @@ describe("injectModels", () => {
     expect(provider.models).toMatchObject({ "m-1": { id: "m-1", api: { url: "http://gw/v1" } } });
     injectModels(cfg as never, [mk("m-2")], "http://gw/v1");
     expect(Object.keys((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models!)).toEqual(["m-2"]);
+  });
+});
+
+describe("injectPlaceholderModel", () => {
+  it("injects a labeled login placeholder when the provider has no models", () => {
+    const cfg: Record<string, unknown> = {};
+    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1");
+    expect(injected).toBe(true);
+    const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
+    expect(provider.models).toMatchObject({
+      login: {
+        id: "login",
+        name: "Log in to load models",
+        providerID: "lunaroute",
+        status: "active",
+        api: { id: "login", url: "http://gw/v1", npm: "@ai-sdk/openai-compatible" },
+      },
+    });
+  });
+  it("never clobbers existing models — returns false and leaves them byte-identical", () => {
+    const cfg: Record<string, unknown> = {
+      provider: { lunaroute: { name: "My LR", models: { "user-model": { id: "user-model", name: "User's own" } } } },
+    };
+    const before = JSON.parse(JSON.stringify(cfg));
+    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1");
+    expect(injected).toBe(false);
+    expect(cfg).toEqual(before);
+  });
+  it("is idempotent: the second call is a no-op, not a duplicate", () => {
+    const cfg: Record<string, unknown> = {};
+    injectPlaceholderModel(cfg as never, "http://gw/v1");
+    const afterFirst = JSON.parse(JSON.stringify(cfg));
+    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1");
+    expect(injected).toBe(false);
+    expect(cfg).toEqual(afterFirst);
+  });
+  it("placeholder entries carry the same shape as real catalog entries", () => {
+    const cfg: Record<string, unknown> = {};
+    injectPlaceholderModel(cfg as never, "http://gw/v1");
+    const placeholder = ((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models ?? {}) as Record<string, Record<string, unknown>>;
+    const real = toProviderModels([mk("m-1")], "http://gw/v1")["m-1"];
+    expect(Object.keys(placeholder["login"]).sort()).toEqual(Object.keys(real).sort());
   });
 });
 

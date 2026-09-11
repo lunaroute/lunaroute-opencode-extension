@@ -9,7 +9,7 @@ import {
   resolveRoutingUrl,
 } from "./lunaroute.js";
 import { createLunarouteAuth } from "./login.js";
-import { createCatalogMemo, fetchCatalog, injectModels, injectProviderStub } from "./models.js";
+import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub } from "./models.js";
 import { createMcpReconciler, resolveAuthState, resolveAuthStorePath, type AuthStoreFS } from "./mcp.js";
 
 export type PluginLog = (level: "info" | "warn", message: string) => void;
@@ -157,12 +157,18 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
                 }
                 injectModels(cfg, result.models, effectiveRoutingUrl);
               }
-            } else if (resolution.state === "logged-out" && !firstRunHintShown) {
-              firstRunHintShown = true;
-              log("info", "Run /connect and choose LunaRoute to start using LunaRoute.");
+            } else {
+              // logged-out / indeterminate: existing models stay untouched (fail-safe
+              // retention per the spec's availability policy). When there are none,
+              // inject the labeled login placeholder — OpenCode drops zero-model
+              // providers from its provider state, which would hide LunaRoute from
+              // /connect entirely (dpd0).
+              injectPlaceholderModel(cfg, effectiveRoutingUrl);
+              if (resolution.state === "logged-out" && !firstRunHintShown) {
+                firstRunHintShown = true;
+                log("info", "Run /connect and choose LunaRoute to start using LunaRoute.");
+              }
             }
-            // logged-out / indeterminate: leave any existing models untouched
-            // (fail-safe retention per the spec's availability policy).
           } catch (err) {
             log("warn", `LunaRoute: model injection failed: ${err instanceof Error ? err.message : String(err)}`);
           }
