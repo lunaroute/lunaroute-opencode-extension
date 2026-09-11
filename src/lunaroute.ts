@@ -80,11 +80,20 @@ export type MappedModel = {
 export type CatalogMappingResult = { ok: true; model: MappedModel } | { ok: false; reason: string };
 
 // Catalog input is untrusted remote input — validation never trusts the source.
+/** Capability families that are not chat models (gateway tags them on capabilities;
+ * pi gx0e + p4eh parity). Table-driven so a future family is a one-line addition.
+ * Explicit `false` is not a tag — only a truthy value marks the family. */
+const NON_CHAT_CAPABILITIES: readonly string[] = ["image_generation", "embeddings", "rerank"];
+
 export function mapCatalogEntry(entry: unknown): CatalogMappingResult {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return { ok: false, reason: "not an object" };
   const e = entry as Record<string, unknown>;
   if (typeof e.id !== "string" || e.id.length === 0) return { ok: false, reason: "missing or invalid id" };
   const caps = (typeof e.capabilities === "object" && e.capabilities !== null && !Array.isArray(e.capabilities) ? e.capabilities : {}) as Record<string, unknown>;
+  // Non-chat check FIRST: an image model with reasoning:true must not surface as a chat model.
+  for (const family of NON_CHAT_CAPABILITIES) {
+    if (caps[family]) return { ok: false, reason: `non_chat_capability (${family})` };
+  }
   const reasoning = caps.reasoning === true;
   const vision = caps.vision === true;
   return {
