@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import type { AuthHook, Plugin } from "@opencode-ai/plugin";
+import type { AuthHook, Plugin, ToolDefinition } from "@opencode-ai/plugin";
 import {
   buildAttributionHeaders,
   defaultModelId,
@@ -11,6 +11,8 @@ import {
 import { createLunarouteAuth } from "./login.js";
 import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub } from "./models.js";
 import { createMcpReconciler, resolveAuthState, resolveAuthStorePath, type AuthStoreFS } from "./mcp.js";
+import { readSettings } from "./settings.js";
+import { buildWebToolMap } from "./web-tools.js";
 
 export type PluginLog = (level: "info" | "warn", message: string) => void;
 
@@ -45,6 +47,10 @@ export type PluginDeps = {
   home?: string;
   log?: PluginLog;
   client?: TestClient;
+  /** Auth-store seam for the first-class web-tools gate, which runs at
+   * factory-invocation time — the config hook's runtime seam does not reach it. */
+  fs?: AuthStoreFS;
+  storeKey?: string;
 };
 
 export type LunarouteHooks = {
@@ -54,6 +60,7 @@ export type LunarouteHooks = {
     req: { provider?: { info?: { id?: string } } },
     output: { headers: Record<string, string> },
   ) => Promise<void>;
+  tool?: Record<string, ToolDefinition>;
   dispose: () => Promise<void>;
 };
 
@@ -75,6 +82,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
   // stub injection reads it back; consumers outside the hook read this variable.
   let effectiveRoutingUrl = envRoutingUrl;
   const mcpUrl = resolveMcpUrl(env);
+  const webToolsStoreKey = deps.storeKey ?? resolveAuthStorePath(env, home);
   const log: PluginLog = deps.log ?? (() => {});
   const reconciler = createMcpReconciler(mcpUrl, log, sessionId);
   const catalogMemo = createCatalogMemo((url, key) => fetchCatalog(url, key, sessionId));
@@ -126,6 +134,24 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
         log("warn", `LunaRoute: post-login default-model pick failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
+
+    // First-class web tools (kata gygp): gated per invocation on settings,
+    // a valid key, and the hosted server's tools/list. Never registered when
+    // logged out; probe failures skip with a warn (the next invocation
+    // retries — nothing is memoized).
+    let webToolMap: Record<string, ToolDefinition> = {};
+    try {
+      webToolMap = await buildWebToolMap({
+        env,
+        mcpUrl,
+        sessionId,
+        log,
+        resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
+        readSettingsNow: () => readSettings(env, home),
+      });
+    } catch (err) {
+      log("warn", `LunaRoute: web tools registration failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     return {
       config: async (cfg: Record<string, unknown>, runtime?: PluginRuntime) => {
@@ -195,6 +221,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
           Object.assign(output.headers, buildAttributionHeaders(sessionId));
         }
       },
+      tool: webToolMap,
       dispose: async () => {},
     };
   };

@@ -18,7 +18,9 @@ const fsThrowing = () => ({
   },
 });
 
-function makePlugin(overrides: { client?: TestClient } = {}) {
+function makePlugin(
+  overrides: { client?: TestClient; fs?: { readFile: (path: string) => Promise<string> }; storeKey?: string } = {},
+) {
   const logs: { level: string; message: string }[] = [];
   const plugin = createLunaroutePlugin({
     env: ENV as NodeJS.ProcessEnv,
@@ -381,6 +383,73 @@ describe("post-login model auto-pick", () => {
       await flush();
       expect(configUpdate).not.toHaveBeenCalled();
       expect(logs.some((l) => l.level === "warn" && /post-login/.test(l.message))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("web tools wiring (kata gygp)", () => {
+  const toolsListJson = (names: string[], id: number) =>
+    JSON.stringify({ jsonrpc: "2.0", id, result: { tools: names.map((name) => ({ name })) } });
+
+  it("valid key + server offers web_search → hooks.tool.web_search registered; config hook unaffected", async () => {
+    const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes("/models")) {
+        return { ok: true, json: async () => ({ data: [{ id: "m-1" }] }) };
+      }
+      const body = JSON.parse(String(init?.body)) as { id: number; method: string };
+      return { ok: true, text: async () => toolsListJson(["web_search", "generate_image"], body.id) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const fs = fsWith({ type: "api", key: "lr_good" });
+      const { plugin } = makePlugin({ fs, storeKey: AUTH_PATH });
+      const hooks = await plugin({});
+      expect(hooks.tool?.web_search).toBeDefined();
+      expect(hooks.tool?.web_search?.description).toContain("Search the web through LunaRoute");
+      expect(hooks.tool?.web_fetch).toBeUndefined(); // server does not offer a fetch tool
+      // the probe hit the MCP URL with the stored key
+      const probe = fetchMock.mock.calls.find((c) => String(c[0]) === "http://mcp");
+      expect(probe).toBeDefined();
+      expect((probe?.[1]?.headers as Record<string, string>)["LUNAROUTE-API-KEY"]).toBe("lr_good");
+      // the config hook still works alongside
+      const cfg: Record<string, unknown> = {};
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      expect(providerOf(cfg).models).toHaveProperty("m-1");
+      expect(mcpOf(cfg).headers["LUNAROUTE-API-KEY"]).toBe("lr_good");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("logged out → no tools and no probe (fetch untouched)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { plugin } = makePlugin({ fs: fsWith(undefined), storeKey: AUTH_PATH });
+      const hooks = await plugin({});
+      expect(Object.keys(hooks.tool ?? {})).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("probe failure → no tools + one warn (retried on the next invocation)", async () => {
+    const fetchMock = vi.fn(async (url: unknown) => {
+      if (String(url).includes("/models")) {
+        return { ok: true, json: async () => ({ data: [{ id: "m-1" }] }) };
+      }
+      return { ok: false, status: 503, text: async () => "" };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const fs = fsWith({ type: "api", key: "lr_good" });
+      const { plugin, logs } = makePlugin({ fs, storeKey: AUTH_PATH });
+      const hooks = await plugin({});
+      expect(Object.keys(hooks.tool ?? {})).toEqual([]);
+      expect(logs.some((l) => l.level === "warn" && /web tools not registered/.test(l.message))).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }
