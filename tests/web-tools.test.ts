@@ -21,8 +21,8 @@ import {
 type JsonRpcBody = { jsonrpc: string; id: number; method: string; params?: unknown };
 type RecordedCall = { url: string; headers: Record<string, string>; signal?: AbortSignal; body: JsonRpcBody };
 
-const jsonResponse = (payload: unknown) =>
-  ({ ok: true, text: async () => JSON.stringify(payload) }) as unknown as Response;
+const jsonResponse = (payload: unknown, headers?: { get(name: string): string | null }) =>
+  ({ ok: true, headers, text: async () => JSON.stringify(payload) }) as unknown as Response;
 const statusResponse = (status: number) => ({ ok: false, status, text: async () => "" }) as unknown as Response;
 
 interface FakeMcpRoutes {
@@ -32,6 +32,8 @@ interface FakeMcpRoutes {
   initializeOk?: boolean;
   failToolsList?: boolean;
   listError?: { message: string };
+  /** Stateful-gateway mode: initialize responds with Mcp-Session-Id. */
+  sessionHeader?: string;
 }
 
 function fakeMcp(routes: FakeMcpRoutes = {}) {
@@ -42,7 +44,13 @@ function fakeMcp(routes: FakeMcpRoutes = {}) {
     calls.push({ url, headers, signal: init?.signal ?? undefined, body });
     if (body.method === "initialize") {
       if (routes.initializeOk === false) return statusResponse(500);
-      return jsonResponse({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-06-18", capabilities: {} } });
+      const headers = routes.sessionHeader
+        ? { get: (name: string): string | null => (name.toLowerCase() === "mcp-session-id" ? routes.sessionHeader! : null) }
+        : undefined;
+      return jsonResponse(
+        { jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-06-18", capabilities: {} } },
+        headers,
+      );
     }
     if (body.method === "tools/list") {
       if (routes.failToolsList) return statusResponse(503);
@@ -114,7 +122,20 @@ describe("createLunarouteMcpClient", () => {
       expect(c.headers.Accept).toBe("application/json, text/event-stream");
       expect(c.headers["LUNAROUTE-API-KEY"]).toBe("lr_k");
       expect(c.headers["lunaroute-agent"]).toBe("opencode");
+      expect(c.headers["Mcp-Session-Id"]).toBeUndefined(); // stateless server: header never sent
     }
+    expect("id" in calls[1].body).toBe(false); // notifications/initialized is a true notification
+  });
+
+  it("captures Mcp-Session-Id from initialize and echoes it on every later request of the client", async () => {
+    const { fetchImpl, calls } = fakeMcp({ tools: ["web_search"], sessionHeader: "sess-gw" });
+    const client = createLunarouteMcpClient({ url: "http://mcp", headers: {}, fetchImpl });
+    await client.listTools();
+    expect(calls[0].headers["Mcp-Session-Id"]).toBeUndefined(); // initialize itself carries none
+    expect(calls[1].headers["Mcp-Session-Id"]).toBe("sess-gw");
+    expect(calls[2].headers["Mcp-Session-Id"]).toBe("sess-gw");
+    await client.callTool("web_search", {});
+    expect(callBodies(calls, "tools/call")[0].headers["Mcp-Session-Id"]).toBe("sess-gw");
   });
 
   it("initialize rejection is tolerated (stateless server)", async () => {
@@ -214,6 +235,21 @@ describe("parseWebSearchPayload + formatWebSearchForModel", () => {
   });
   it("empty results message", () => {
     expect(formatWebSearchForModel({ query: "q", provider: "brave", results: [] })).toBe('No results for "q" (provider: brave).');
+  });
+  it("hostile payload shapes never throw: non-object results dropped, non-string fields normalized", () => {
+    const payload = parseWebSearchPayload(
+      JSON.stringify({ query: "q", provider: "brave", results: [null, 5, { title: 42, url: "https://u", snippet: {}, published_date: "2026-01-01" }] }),
+    );
+    expect(payload.results).toHaveLength(1);
+    const out = formatWebSearchForModel(payload);
+    expect(out).toContain("(untitled)");
+    expect(out).toContain("https://u");
+    expect(out).toContain("published: 2026-01-01");
+  });
+  it("results array of nulls → empty-results message (no throw)", () => {
+    const payload = parseWebSearchPayload('{"results":[null]}');
+    expect(payload.results).toEqual([]);
+    expect(formatWebSearchForModel(payload)).toBe("No results.");
   });
 });
 

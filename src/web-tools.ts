@@ -24,9 +24,10 @@ import { resolveSearchProvider, webToolsEnabled, type LunarouteSettings } from "
  *
  * Transport (verified against pi's web-tools.ts, ported near-verbatim): the
  * hosted server is stateless Streamable HTTP over plain JSON — tools/call
- * works standalone, no Mcp-Session-Id is issued. A one-time initialize
- * handshake is still sent so stateful gateways behind LUNAROUTE_MCP_URL
- * behave; a returned session header is not propagated.
+ * works standalone. A one-time initialize handshake is still sent so
+ * stateful gateways behind LUNAROUTE_MCP_URL behave; a returned
+ * Mcp-Session-Id is captured and echoed for that client's lifetime (the
+ * client is fresh per execute, so no cross-execute state).
  */
 
 // ============================================================================
@@ -119,22 +120,31 @@ export function createLunarouteMcpClient(opts: {
 }): LunarouteMcpClient {
   let nextId = 1;
   let initialized = false;
+  // Issued by stateful Streamable HTTP gateways on initialize; captured once
+  // and echoed on every later request of THIS client. The client is fresh
+  // per execute, so this is per-call state — never shared across executes.
+  let serverSessionId: string | undefined;
+
+  const wireHeaders = (): Record<string, string> => ({
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+    ...opts.headers,
+    ...(serverSessionId ? { "Mcp-Session-Id": serverSessionId } : {}),
+  });
 
   async function rpc(method: string, params?: unknown, signal?: AbortSignal): Promise<unknown> {
     const id = nextId++;
     const response = await opts.fetchImpl(opts.url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        ...opts.headers,
-      },
+      headers: wireHeaders(),
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
       signal,
     });
     if (!response.ok) {
       throw new Error(`MCP ${method} failed: HTTP ${response.status}`);
     }
+    const issued = response.headers?.get?.("Mcp-Session-Id");
+    if (typeof issued === "string" && issued && !serverSessionId) serverSessionId = issued;
     const decoded = decodeJsonRpcBody(await response.text(), id);
     if (decoded.error) {
       throw new Error(`MCP ${method} failed: ${decoded.error.message ?? "unknown error"}`);
@@ -142,14 +152,28 @@ export function createLunarouteMcpClient(opts: {
     return decoded.result;
   }
 
+  /** JSON-RPC notification: no id, no response decoded or required (MCP
+   * spec) — but the POST itself is awaited so wire order is kept. */
+  async function notify(method: string, signal?: AbortSignal): Promise<void> {
+    try {
+      const response = await opts.fetchImpl(opts.url, {
+        method: "POST",
+        headers: wireHeaders(),
+        body: JSON.stringify({ jsonrpc: "2.0", method }),
+        signal,
+      });
+      void response.text().catch(() => {}); // drain; notifications get 202/empty
+    } catch {
+      // Best-effort: a stateless server may reject the POST outright.
+    }
+  }
+
   async function ensureInitialized(signal?: AbortSignal): Promise<void> {
     if (initialized) return;
     initialized = true;
     try {
-      // Fire-and-forget politeness: stateless servers (production) just
-      // answer; stateful ones issue Mcp-Session-Id, which we cannot
-      // propagate without per-request state — such gateways are not a
-      // supported target for the direct client.
+      // Stateless servers (production) just answer the handshake; stateful
+      // ones issue Mcp-Session-Id, which we capture and echo below.
       await rpc(
         "initialize",
         {
@@ -159,7 +183,7 @@ export function createLunarouteMcpClient(opts: {
         },
         signal,
       );
-      await rpc("notifications/initialized", undefined, signal);
+      await notify("notifications/initialized", signal);
     } catch {
       // Stateless servers may reject initialize; tools/call still works.
     }
@@ -206,6 +230,21 @@ export interface WebSearchPayload {
   rawText?: string;
 }
 
+/** Trust boundary: the server payload is untrusted remote input — normalize
+ * each result to the known fields (drop non-objects and non-string fields)
+ * so formatting can never throw on malformed shapes. */
+function sanitizeResult(r: unknown): WebSearchResultItem | null {
+  if (typeof r !== "object" || r === null || Array.isArray(r)) return null;
+  const o = r as Record<string, unknown>;
+  return {
+    title: typeof o.title === "string" ? o.title : undefined,
+    url: typeof o.url === "string" ? o.url : undefined,
+    snippet: typeof o.snippet === "string" ? o.snippet : undefined,
+    published_date: typeof o.published_date === "string" ? o.published_date : null,
+    score: typeof o.score === "number" ? o.score : null,
+  };
+}
+
 /** Parse the normalized {query, provider, results[]} payload the MCP tool
  * returns as its content text. Tolerant: any parse failure keeps the raw
  * text so the model still sees what the server sent. */
@@ -215,7 +254,9 @@ export function parseWebSearchPayload(text: string): WebSearchPayload {
     return {
       query: typeof parsed.query === "string" ? parsed.query : "",
       provider: typeof parsed.provider === "string" ? parsed.provider : "",
-      results: Array.isArray(parsed.results) ? parsed.results : [],
+      results: Array.isArray(parsed.results)
+        ? parsed.results.map(sanitizeResult).filter((r): r is WebSearchResultItem => r !== null)
+        : [],
     };
   } catch {
     return { query: "", provider: "", results: [], rawText: text };
