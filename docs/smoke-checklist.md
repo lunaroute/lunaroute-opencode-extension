@@ -107,6 +107,33 @@ Where to look:
   the default model is **not** changed by the post-login auto-pick (the
   auto-pick only fires when no default is set).
 
+## Web search, first-class `web_search` (kata gygp)
+
+- [ ] **W1 — First-class web_search registered.** Logged in, restart
+  OpenCode: `web_search` is callable (ask the agent to search something);
+  the tool output carries normalized results (title/url/snippet/date). The
+  MCP duplicate (`lunaroute_web_search`) also exists — expected, documented
+  coexistence.
+- [ ] **W2 — Attribution on the search path.** Staging MCP server logs show
+  `LUNAROUTE-API-KEY` + the attribution triple on the direct web_search
+  calls (not just on `mcp.lunaroute` traffic).
+- [ ] **W3 — Provider selection.** With
+  `~/.local/share/opencode/lunaroute.json` set to `{"searchProvider": "brave"}`:
+  a search without a provider arg uses brave (per the server's echoed
+  provider), the next call after removing the setting follows the file
+  (server default), and a per-call `provider` argument beats both.
+- [ ] **W4 — Disable paths.** `LUNAROUTE_WEB_TOOLS=off` + restart → no
+  `web_search`; unset env + `{"webTools": "off"}` + restart → none; remove
+  the settings file → the tool is back.
+- [ ] **W5 — Logged out / login timing.** Remove the `lunaroute` entry from
+  auth.json and restart: no `web_search` registered. Log back in
+  mid-session: the tool appears after the instance reload (restart always
+  works); a stale registered tool fails with the run-`/connect` error, never
+  a stale-key call.
+- [ ] **W6 — web_fetch stays dormant.** The hosted server does not offer a
+  fetch tool today: `web_fetch` must NOT be registered (it lights up
+  automatically when the server ships one).
+
 ---
 
 Result: _pending_ (all items PASS → release may proceed; any FAIL → fix,
