@@ -11,7 +11,7 @@ import {
 import { createLunarouteAuth } from "./login.js";
 import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub } from "./models.js";
 import { createMcpReconciler, resolveAuthState, resolveAuthStorePath, type AuthStoreFS } from "./mcp.js";
-import { readSettings } from "./settings.js";
+import { mcpEnabled, readSettings } from "./settings.js";
 import { buildWebToolMap } from "./web-tools.js";
 
 export type PluginLog = (level: "info" | "warn", message: string) => void;
@@ -29,6 +29,10 @@ export type TestClient = {
     get(): Promise<{ data?: { model?: string; provider?: unknown }; model?: string; provider?: unknown }>;
     update(body: { config: { model: string } }): Promise<unknown>;
   };
+  /** Optional server-side log sink (POST /log → instance log). Present on the
+   * real SDK client; production logging routes through it because PluginInput
+   * carries no logger (verified in the plugin types + live-apply spike). */
+  app?: { log(args: { body: { service: string; level: "debug" | "info" | "warn" | "error"; message: string } }): Promise<unknown> };
 };
 
 /**
@@ -83,14 +87,36 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
   let effectiveRoutingUrl = envRoutingUrl;
   const mcpUrl = resolveMcpUrl(env);
   const webToolsStoreKey = deps.storeKey ?? resolveAuthStorePath(env, home);
-  const log: PluginLog = deps.log ?? (() => {});
-  const reconciler = createMcpReconciler(mcpUrl, log, sessionId);
+  // Production logging: PluginInput carries no logger, so without injection
+  // the only visible sink is client.app.log (POST /log → instance log) —
+  // resolved per invocation below (the client arrives with `input`). The
+  // reconciler is built once per process but logs per invocation, so it logs
+  // through this ref.
+  const noopLog: PluginLog = () => {};
+  const logRef = { current: deps.log ?? noopLog };
+  const reconciler = createMcpReconciler(mcpUrl, (level, message) => logRef.current(level, message), sessionId);
   const catalogMemo = createCatalogMemo((url, key) => fetchCatalog(url, key, sessionId));
   let firstRunHintShown = false;
 
   return async (input) => {
     const clientOf = (runtime?: PluginRuntime): TestClient | undefined =>
       runtime?.client ?? deps.client ?? input?.client;
+
+    /** Production log sink via the SDK client; absent client/app → undefined
+     * (the caller falls back to the noop). Never throws, never awaited. */
+    const clientLogOf = (client: TestClient | undefined): PluginLog | undefined => {
+      const app = client?.app;
+      if (!app?.log) return undefined;
+      return (level, message) => {
+        try {
+          void app.log({ body: { service: "lunaroute", level, message } }).catch(() => {});
+        } catch {
+          // Logging must never break a hook.
+        }
+      };
+    };
+    const log: PluginLog = deps.log ?? clientLogOf(input?.client) ?? noopLog;
+    logRef.current = log;
 
     /** Resolve the current default model from either SDK get() shape (wrapped or flat). */
     const currentModelOf = (cfg: { data?: { model?: string }; model?: string } | undefined | null): string | undefined =>
@@ -130,6 +156,9 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
         const fresh = currentModelOf(await client.config.get()); // re-read guard: a concurrent selection wins
         if (fresh) return;
         await client.config.update({ config: { model: `${LUNAROUTE_PROVIDER}/${id}` } });
+        // Visible default-model feedback (pi 9v71 parity, folded into f2aj):
+        // the pick is pointless if the user cannot see it happened.
+        log("info", `LunaRoute: set ${LUNAROUTE_PROVIDER}/${id} as the default model (change with /models)`);
       } catch (err) {
         log("warn", `LunaRoute: post-login default-model pick failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -147,7 +176,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
         sessionId,
         log,
         resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
-        readSettingsNow: () => readSettings(env, home),
+        readSettingsNow: () => readSettings(env, home, undefined, (reason) => log("warn", `LunaRoute: ${reason}`)),
       });
     } catch (err) {
       log("warn", `LunaRoute: web tools registration failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -199,7 +228,17 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
             log("warn", `LunaRoute: model injection failed: ${err instanceof Error ? err.message : String(err)}`);
           }
           try {
-            reconciler.reconcile(cfg, resolution, storeKey);
+            // Settings gate the MCP contributor (kata f2aj). Deliberately NOT
+            // an early return: the models contributor above and the
+            // factory-time web-tools gate below are untouched when MCP is off
+            // (pi bjy9 caught that early-return bug with a test — mirrored in
+            // our tests). The mcp.lunaroute entry is per-instance live config:
+            // after a reload (restart or any PATCH-triggered apply) the new
+            // instance simply never gets it.
+            const settings = readSettings(env, home, undefined, (reason) => log("warn", `LunaRoute: ${reason}`));
+            if (mcpEnabled(settings)) {
+              reconciler.reconcile(cfg, resolution, storeKey);
+            }
           } catch (err) {
             log("warn", `LunaRoute: MCP injection failed: ${err instanceof Error ? err.message : String(err)}`);
           }

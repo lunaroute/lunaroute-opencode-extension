@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
 import { createLunaroutePlugin, type LunarouteHooks, type TestClient } from "../src/index.js";
 
 const ENV = {
@@ -19,7 +22,12 @@ const fsThrowing = () => ({
 });
 
 function makePlugin(
-  overrides: { client?: TestClient; fs?: { readFile: (path: string) => Promise<string> }; storeKey?: string } = {},
+  overrides: {
+    client?: TestClient;
+    fs?: { readFile: (path: string) => Promise<string> };
+    storeKey?: string;
+    home?: string;
+  } = {},
 ) {
   const logs: { level: string; message: string }[] = [];
   const plugin = createLunaroutePlugin({
@@ -290,7 +298,7 @@ describe("post-login model auto-pick", () => {
   it("writes exactly { model } when unset", async () => {
     const configGet = vi.fn().mockResolvedValue({ data: {} });
     const { client, configUpdate } = makeClient(configGet);
-    const { plugin } = makePlugin({ client });
+    const { plugin, logs } = makePlugin({ client });
     vi.stubGlobal("fetch", catalogFetch());
     const hooks = await plugin({ client });
     try {
@@ -298,6 +306,11 @@ describe("post-login model auto-pick", () => {
       await flush();
       expect(configUpdate).toHaveBeenCalledTimes(1);
       expect(configUpdate).toHaveBeenCalledWith({ config: { model: "lunaroute/m-1" } });
+      // Visible default-model feedback (pi 9v71 parity, folded into f2aj).
+      expect(logs).toContainEqual({
+        level: "info",
+        message: "LunaRoute: set lunaroute/m-1 as the default model (change with /models)",
+      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -450,6 +463,98 @@ describe("web tools wiring (kata gygp)", () => {
       const hooks = await plugin({});
       expect(Object.keys(hooks.tool ?? {})).toEqual([]);
       expect(logs.some((l) => l.level === "warn" && /web tools not registered/.test(l.message))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("settings: MCP toggle + malformed-file warn (kata f2aj)", () => {
+  let tempHome: string;
+  const settingsFile = () => join(tempHome, ".local", "share", "opencode", "lunaroute.json");
+  const writeSettingsFile = (content: string) => {
+    mkdirSync(dirname(settingsFile()), { recursive: true });
+    writeFileSync(settingsFile(), content);
+  };
+
+  const routedFetch = (mcpTools: string[]) =>
+    vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes("/models")) {
+        return { ok: true, json: async () => ({ data: [{ id: "m-1" }] }) };
+      }
+      const body = JSON.parse(String(init?.body)) as { id: number };
+      return {
+        ok: true,
+        text: async () => JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: mcpTools.map((name) => ({ name })) } }),
+      };
+    });
+
+  beforeEach(() => {
+    tempHome = mkdtempSync(join(tmpdir(), "lr-f2aj-"));
+  });
+  afterEach(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it("mcp off: no mcp.lunaroute injected, but models + web tools land (no early-return bug — pi bjy9 parity)", async () => {
+    writeSettingsFile(JSON.stringify({ mcp: "off" }));
+    const fetchMock = routedFetch(["web_search"]);
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const fs = fsWith({ type: "api", key: "lr_good" });
+      const { plugin } = makePlugin({ fs, storeKey: AUTH_PATH, home: tempHome });
+      const hooks = await plugin({});
+      const cfg: Record<string, unknown> = {};
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      expect((cfg.mcp as Record<string, unknown> | undefined)?.lunaroute).toBeUndefined();
+      expect(providerOf(cfg).models).toHaveProperty("m-1"); // models contributor untouched
+      expect(hooks.tool?.web_search).toBeDefined(); // web-tools gate untouched
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("malformed settings file: warn (per reader) + defaults behavior (mcp on)", async () => {
+    writeSettingsFile("{oops");
+    const fetchMock = routedFetch([]);
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const fs = fsWith({ type: "api", key: "lr_good" });
+      const { plugin, logs } = makePlugin({ fs, storeKey: AUTH_PATH, home: tempHome });
+      const hooks = await plugin({});
+      const cfg: Record<string, unknown> = {};
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      // defaults behavior: mcp on → entry injected
+      expect(mcpOf(cfg).headers["LUNAROUTE-API-KEY"]).toBe("lr_good");
+      // warn from the config hook's reader (the web-tools gate warns too)
+      expect(logs.some((l) => l.level === "warn" && /settings file is not valid JSON/.test(l.message))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("production logging routes through client.app.log when no deps.log is injected", async () => {
+    const appLog = vi.fn(async (_args: { body: { service: string; level: string; message: string } }) => ({}));
+    const client = {
+      config: { get: async () => ({ data: {} }), update: vi.fn() },
+      app: { log: appLog },
+    } as unknown as TestClient;
+    // Direct construction: makePlugin always injects deps.log, which would
+    // bypass the production path under test.
+    const plugin = createLunaroutePlugin({ env: ENV as NodeJS.ProcessEnv, home: "/fake/home", client });
+    const hooks = await plugin({ client });
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("gateway down");
+      }),
+    );
+    try {
+      await hooks.config({}, { storeKey: AUTH_PATH, fs });
+      const bodies = appLog.mock.calls.map((c) => c[0].body as { service: string; level: string; message: string });
+      expect(bodies.some((b) => b.service === "lunaroute" && b.level === "warn")).toBe(true);
+      expect(bodies.every((b) => typeof b.message === "string")).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

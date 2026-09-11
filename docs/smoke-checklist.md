@@ -134,6 +134,31 @@ Where to look:
   fetch tool today: `web_fetch` must NOT be registered (it lights up
   automatically when the server ships one).
 
+## Settings (kata f2aj)
+
+Settings file: `$XDG_DATA_HOME/opencode/lunaroute.json` (default
+`~/.local/share/opencode/lunaroute.json`). See README "Settings".
+
+- [ ] **S1 — webTools toggle + env hatch.** With `{"webTools": "off"}` +
+  restart: no `web_search`; remove the file + restart: it is back.
+  `LUNAROUTE_WEB_TOOLS=off` wins over the file (tool stays off even with
+  `"webTools": "on"` in the file).
+- [ ] **S2 — MCP toggle isolation.** With `{"mcp": "off"}` + restart: no
+  `mcp.lunaroute` in the live config, but LunaRoute models are listed and
+  `web_search` still registers (the pi bjy9 early-return bug must not
+  reproduce here).
+- [ ] **S3 — Malformed settings file.** Write `{oops` into the settings file
+  and restart: exactly a warn (not a crash), session works with defaults,
+  and the instance log carries the reason.
+- [ ] **S4 — Default-model feedback.** Fresh state (no default model set),
+  `/connect` login: the instance log records the auto-pick ("set
+  lunaroute/<id> as the default model (change with /models)").
+- [ ] **S5 — Re-verify item 6 on OpenCode 1.18.30.** The live-apply spike
+  ([docs/settings-live-apply-spike.md](./settings-live-apply-spike.md))
+  observed tarball-path plugin entries NOT loading on 1.18.30 (they loaded
+  on 1.18.25); confirm the npm-pack install path still works before
+  release, and adjust the README install instructions if it regressed.
+
 ---
 
 Result: _pending_ (all items PASS → release may proceed; any FAIL → fix,

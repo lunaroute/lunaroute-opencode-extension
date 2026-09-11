@@ -60,7 +60,7 @@ Choose **LunaRoute**, then **Log in with browser** (a browser opens to
 key is issued and stored) or **Paste an API key** (paste an existing `lr_...`
 key). If you haven't already set a default model, the first LunaRoute model
 is picked for you — run `/models` only if you want to choose a different
-one.
+one. The pick is recorded in the instance log so you can see what happened.
 
 On a headless machine (or when your browser is on another computer), choose
 **Log in from a remote browser** instead: open the URL it shows in any
@@ -112,6 +112,37 @@ the LunaRoute MCP URL + the expected headers). Two consequences:
 
 A `mcp.lunaroute` entry that doesn't match the plugin's shape is always left
 untouched.
+
+## Settings
+
+User preferences live in `$XDG_DATA_HOME/opencode/lunaroute.json` (default
+`~/.local/share/opencode/lunaroute.json` — next to the auth store, mirroring
+pi's layout). The file is the source of truth and every consumer re-reads it:
+provider selection follows the file on the very next tool call.
+
+| Key | Values | Default | Controls |
+|---|---|---|---|
+| `mcp` | `"on"` / `"off"` | `"on"` | `mcp.lunaroute` registration |
+| `webTools` | `"on"` / `"off"` | `"on"` | first-class `web_search` / `web_fetch` |
+| `searchProvider` | `"server"` / `"brave"` / `"exa"` / `"kagi"` | `"server"` | default search provider (`server` = omit → server default) |
+| `imageTools` | `"on"` / `"off"` | `"on"` | first-class image tools (when they land) |
+| `convertTools` | `"on"` / `"off"` | `"on"` | first-class document conversion (when it lands) |
+
+Environment escape hatches only ever **disable** (values `off`, `0`,
+`false`): `LUNAROUTE_WEB_TOOLS`, `LUNAROUTE_IMAGE_TOOLS`,
+`LUNAROUTE_CONVERT_TOOLS`.
+
+- **Tolerant reader**: an unreadable or malformed file falls back to defaults
+  and logs one warn line — it never crashes the session. Invalid single
+  values fall back per key, silently.
+- **Live apply**: provider selection applies to the very next tool call with
+  no reload. Registration-time gates (web tools, MCP) re-evaluate when the
+  instance reloads — a restart, a login, or any config change does it (the
+  plugin's own post-login config write triggers exactly this). The planned
+  `/lunaroute` settings command will write the file and trigger that reload
+  for you.
+- **Isolation**: turning `mcp` off never affects models or the web tools —
+  each contributor gates independently.
 
 ## Web search (`web_search`)
 
@@ -206,6 +237,9 @@ key validation) — one effective URL for all of them.
   `/connect`, then reload or restart; if it's still missing, the server
   didn't offer it to your org. `LUNAROUTE_WEB_TOOLS=off` disables it on
   purpose.
+- **Settings file problems**: a malformed `lunaroute.json` logs one warn and
+  behaves as if the file were absent (defaults) — fix the JSON and reload;
+  nothing else is affected.
 - **Windows**: not supported in v1 — the auth store path is verified on
   Linux and macOS only.
 
