@@ -101,7 +101,7 @@ describe("config hook", () => {
     }
   });
 
-  it("logged out: provider stub only — no models, no MCP, fetch untouched, one first-run hint", async () => {
+  it("logged out: stub + labeled login placeholder (exactly one), no MCP, fetch untouched, one first-run hint", async () => {
     const fs = fsWith(undefined); // readable store, no lunaroute entry
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -111,7 +111,9 @@ describe("config hook", () => {
       const cfg: Record<string, unknown> = {};
       await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
       expect(providerOf(cfg)).toBeDefined();
-      expect(providerOf(cfg).models).toBeUndefined();
+      const models = providerOf(cfg).models as Record<string, Record<string, unknown>> | undefined;
+      expect(Object.keys(models ?? {})).toEqual(["login"]);
+      expect(models?.login).toMatchObject({ name: "Log in to load models", status: "active" });
       expect((cfg.mcp as Record<string, unknown> | undefined)?.lunaroute).toBeUndefined();
       expect(fetchMock).not.toHaveBeenCalled();
       expect(logs).toEqual([{ level: "info", message: "Run /connect and choose LunaRoute to start using LunaRoute." }]);
@@ -120,16 +122,58 @@ describe("config hook", () => {
     }
   });
 
-  it("indeterminate (unreadable store): stub lands, models + MCP untouched, silent — per-contributor error isolation", async () => {
+  it("indeterminate (unreadable store): stub + labeled login placeholder, MCP untouched, silent — per-contributor error isolation", async () => {
     const { plugin, logs } = makePlugin();
     const hooks = await plugin({});
     const cfg: Record<string, unknown> = {};
     await hooks.config(cfg, { storeKey: AUTH_PATH, fs: fsThrowing() });
     expect(providerOf(cfg)).toBeDefined();
-    expect(providerOf(cfg).models).toBeUndefined();
+    expect(Object.keys(providerOf(cfg).models as Record<string, unknown>)).toEqual(["login"]);
     expect((cfg.mcp as Record<string, unknown> | undefined)?.lunaroute).toBeUndefined();
     // Spec's normative indeterminate logging rule: silent no-op when nothing was retained.
     expect(logs).toEqual([]);
+  });
+
+  it("logged out with user-set models: preserved byte-identical, no placeholder added", async () => {
+    const fs = fsWith(undefined);
+    const { plugin } = makePlugin();
+    const hooks = await plugin({});
+    const cfg: Record<string, unknown> = {
+      provider: { lunaroute: { name: "My LR", models: { "user-model": { id: "user-model", name: "User's own" } } } },
+    };
+    const modelsBefore = JSON.parse(JSON.stringify(providerOf(cfg).models));
+    await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+    const models = providerOf(cfg).models as Record<string, unknown>;
+    expect(models).toEqual(modelsBefore); // user models preserved byte-identical
+    expect(Object.keys(models)).toEqual(["user-model"]); // no placeholder added
+  });
+
+  it("valid + catalog success: only catalog models — placeholder never injected", async () => {
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: "m-1" }] }) }));
+    try {
+      const { plugin } = makePlugin();
+      const hooks = await plugin({});
+      const cfg: Record<string, unknown> = {};
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      expect(Object.keys(providerOf(cfg).models as Record<string, unknown>)).toEqual(["m-1"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("valid + catalog fetch failure: no models and no placeholder (transient outage keeps today's fail-safe)", async () => {
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("gateway down")));
+    try {
+      const { plugin } = makePlugin();
+      const hooks = await plugin({});
+      const cfg: Record<string, unknown> = {};
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      expect(providerOf(cfg).models).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("catalog fetch failure: stub + MCP land, no models, one warn", async () => {

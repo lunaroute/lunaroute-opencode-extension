@@ -81,6 +81,39 @@ export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: st
   providers[LUNAROUTE_PROVIDER] = provider;
 }
 
+export const PLACEHOLDER_MODEL_ID = "login";
+
+/** Pre-login placeholder: OpenCode drops zero-model providers from its provider
+ * state, which hides a config-only provider from /connect entirely (dpd0). A
+ * single labeled placeholder keeps the provider connectable and tells the user
+ * what to do. Additive-only: existing models (user-written or catalog) always
+ * win; the post-login catalog replaces the placeholder wholesale. */
+export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string): boolean {
+  const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
+  cfg.provider = providers;
+  const provider = providers[LUNAROUTE_PROVIDER] ?? {};
+  const existing = (provider.models ?? {}) as Record<string, unknown>;
+  if (Object.keys(existing).length > 0) return false;
+  provider.models = toProviderModels(
+    [
+      {
+        id: PLACEHOLDER_MODEL_ID,
+        name: "Log in to load models",
+        reasoning: false,
+        tool_call: true,
+        attachment: false,
+        limitContext: 128000,
+        limitOutput: 8192,
+        modalitiesInput: ["text"],
+        variants: {},
+      },
+    ],
+    baseUrl,
+  );
+  providers[LUNAROUTE_PROVIDER] = provider;
+  return true;
+}
+
 /** Per-process per-(URL, credential) memo: concurrent callers share one in-flight fetch;
  * a SUCCESSFUL result is reused for later same-key calls (config hook runs multiple
  * times per process); a FAILED result is never cached — the next call retries.
