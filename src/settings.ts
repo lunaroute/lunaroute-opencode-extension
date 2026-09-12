@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 /**
  * LunaRoute user settings — READ side (kata gygp).
@@ -42,8 +43,10 @@ export const DEFAULT_SETTINGS: LunarouteSettings = {
 /** Static v1 list (pi parity); the server may support more. */
 export const SEARCH_PROVIDERS: readonly SearchProviderSetting[] = ["server", "brave", "exa", "kagi"] as const;
 
-/** Env escape hatch — only ever disables (off|0|false), mirroring pi. */
+/** Env escape hatches — only ever disable (off|0|false), mirroring pi. */
 export const LUNAROUTE_ENV_WEB_TOOLS = "LUNAROUTE_WEB_TOOLS";
+export const LUNAROUTE_ENV_IMAGE_TOOLS = "LUNAROUTE_IMAGE_TOOLS";
+export const LUNAROUTE_ENV_CONVERT_TOOLS = "LUNAROUTE_CONVERT_TOOLS";
 
 // ============================================================================
 // IO (injectable for tests; default = node:fs)
@@ -51,9 +54,17 @@ export const LUNAROUTE_ENV_WEB_TOOLS = "LUNAROUTE_WEB_TOOLS";
 
 export interface SettingsIo {
   readFileSync(path: string): string;
+  writeFileSync(path: string, data: string): void;
+  renameSync(from: string, to: string): void;
+  randomUUID(): string;
 }
 
-const defaultIo: SettingsIo = { readFileSync: (path) => readFileSync(path, "utf8") };
+const defaultIo: SettingsIo = {
+  readFileSync: (path) => readFileSync(path, "utf8"),
+  writeFileSync,
+  renameSync,
+  randomUUID,
+};
 
 export function resolveSettingsPath(env: NodeJS.ProcessEnv, home: string): string {
   const dataHome = env.XDG_DATA_HOME || join(home, ".local", "share");
@@ -70,22 +81,34 @@ function parseSearchProvider(value: unknown): SearchProviderSetting {
     : DEFAULT_SETTINGS.searchProvider;
 }
 
-/** Read settings, tolerantly: missing file, invalid JSON, or invalid values
- * fall back per key. Extra keys are ignored. Never throws. */
-export function readSettings(env: NodeJS.ProcessEnv, home: string, io: SettingsIo = defaultIo): LunarouteSettings {
+/** Read settings, tolerantly: missing file falls back silently; an
+ * unreadable or malformed file falls back to defaults AND reports via
+ * `onInvalid` (kata f2aj: "defaults + warn, never crash") when provided.
+ * Per-key invalid values fall back silently (tolerant reader, pi parity).
+ * Extra keys are ignored. Never throws. */
+export function readSettings(
+  env: NodeJS.ProcessEnv,
+  home: string,
+  io: SettingsIo = defaultIo,
+  onInvalid?: (reason: string) => void,
+): LunarouteSettings {
   let raw: string;
   try {
     raw = io.readFileSync(resolveSettingsPath(env, home));
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    if (code !== "ENOENT") onInvalid?.(`settings file unreadable (${code ?? "unknown error"})`);
     return { ...DEFAULT_SETTINGS };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
+    onInvalid?.("settings file is not valid JSON");
     return { ...DEFAULT_SETTINGS };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    onInvalid?.("settings file is not a JSON object");
     return { ...DEFAULT_SETTINGS };
   }
   const obj = parsed as Record<string, unknown>;
@@ -102,6 +125,26 @@ export function readSettings(env: NodeJS.ProcessEnv, home: string, io: SettingsI
 // Decisions (pure)
 // ============================================================================
 
+/** Atomically write the canonical five-key settings file (tmp + rename — a
+ * crash mid-write can never leave a truncated file). The file is ours:
+ * unknown keys read earlier are not preserved. Throws on IO failure —
+ * callers decide whether that is fatal. */
+export function writeSettings(
+  env: NodeJS.ProcessEnv,
+  home: string,
+  settings: LunarouteSettings,
+  io: SettingsIo = defaultIo,
+): void {
+  const target = resolveSettingsPath(env, home);
+  const tmp = `${target}.${io.randomUUID()}.tmp`;
+  io.writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`);
+  io.renameSync(tmp, target);
+}
+
+// ============================================================================
+// Decisions (pure)
+// ============================================================================
+
 /** Web tools enabled? The env escape hatch wins; the file is the user knob. */
 export function webToolsEnabled(env: NodeJS.ProcessEnv, settings: LunarouteSettings): boolean {
   const v = env[LUNAROUTE_ENV_WEB_TOOLS];
@@ -109,7 +152,60 @@ export function webToolsEnabled(env: NodeJS.ProcessEnv, settings: LunarouteSetti
   return settings.webTools === "on";
 }
 
+/** Image tools enabled? Same contract as webToolsEnabled — the env escape
+ * hatch only ever disables; the file is the user knob (kata e30g consumer
+ * lands with kata 5715). */
+export function imageToolsEnabled(env: NodeJS.ProcessEnv, settings: LunarouteSettings): boolean {
+  const v = env[LUNAROUTE_ENV_IMAGE_TOOLS];
+  if (v === "off" || v === "0" || v === "false") return false;
+  return settings.imageTools === "on";
+}
+
+/** Convert tools enabled? Same contract (kata zpzt consumer lands with gv7t). */
+export function convertToolsEnabled(env: NodeJS.ProcessEnv, settings: LunarouteSettings): boolean {
+  const v = env[LUNAROUTE_ENV_CONVERT_TOOLS];
+  if (v === "off" || v === "0" || v === "false") return false;
+  return settings.convertTools === "on";
+}
+
+/** MCP registration enabled? File-only (no env hatch, pi parity). Consumed by
+ * the MCP reconciler gate in index.ts. */
+export function mcpEnabled(settings: LunarouteSettings): boolean {
+  return settings.mcp === "on";
+}
+
 /** Provider to pass to the MCP web_search tool; undefined = server default. */
 export function resolveSearchProvider(settings: LunarouteSettings): ConcreteSearchProvider | undefined {
   return settings.searchProvider === "server" ? undefined : settings.searchProvider;
+}
+
+// ============================================================================
+// Live apply (spike-verified — docs/settings-live-apply-spike.md)
+// ============================================================================
+
+/** Structural slice of the OpenCode SDK client needed to trigger a reload. */
+export type SettingsApplyClient = {
+  config: {
+    get(): Promise<{ data?: { model?: string }; model?: string }>;
+    update(body: { config: { model: string } }): Promise<unknown>;
+  };
+};
+
+export type SettingsApplyOutcome = "patched" | "skipped-no-model";
+
+/** Trigger the instance reload that makes registration-time gates (web tools,
+ * MCP) re-evaluate against the fresh settings file: a config PATCH marks the
+ * instance for disposal, and the next instance use re-runs the plugin factory
+ * + config hook (spike A/B/A-verified — the tool map rebuilds per instance).
+ * The PATCH re-writes the CURRENT default model — idempotent, never changes
+ * user state. With no default model set there is nothing idempotent to write,
+ * so this skips (the reload then happens on the next natural instance);
+ * callers wanting a forced reload in that case must supply their own patch
+ * body. Throws on client failure — callers handle. */
+export async function applySettingsViaReload(client: SettingsApplyClient): Promise<SettingsApplyOutcome> {
+  const fetched = await client.config.get();
+  const model = fetched?.data?.model ?? fetched?.model;
+  if (!model) return "skipped-no-model";
+  await client.config.update({ config: { model } });
+  return "patched";
 }
