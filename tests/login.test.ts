@@ -257,6 +257,30 @@ describe("remote-browser method (pi #6 parity)", () => {
     expect(await started.callback("code=raw-code")).toEqual({ type: "success", key: "lr_new" });
   });
 
+  it("accepts a bare code with Base64-style trailing padding (roborev job 1850)", async () => {
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth } = makeAuth({ deps: { exchange: exchange as never } });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("abc=")).toEqual({ type: "success", key: "lr_new" });
+    expect(exchange).toHaveBeenCalledWith(
+      "http://api",
+      expect.objectContaining({ code: "abc=" }),
+    );
+  });
+
+  it("a key=value paste that is neither a code/state query nor a bare code fails fast without an exchange", async () => {
+    const logs: { level: string; message: string }[] = [];
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth } = makeAuth({
+      log: (level, message) => logs.push({ level, message }),
+      deps: { exchange: exchange as never },
+    });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("foo=bar")).toEqual({ type: "failed" });
+    expect(exchange).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.message === "LunaRoute remote-browser login failed: no code found in paste")).toBe(true);
+  });
+
   it("reason-specific failure logs: no-code vs state mismatch", async () => {
     const logs: { level: string; message: string }[] = [];
     const exchange = vi.fn(async () => goodExchange);

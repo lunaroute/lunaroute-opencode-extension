@@ -230,13 +230,15 @@ export function createLunarouteAuth(opts: {
                 let normalized: string;
                 if (urlMatch) {
                   normalized = urlMatch[0];
-                } else if (trimmed.includes("=")) {
+                } else if (/(?:^|[&?])(?:code|state)=/i.test(trimmed)) {
                   // Accept a bare "code=..&state=.." query string (optional leading ?).
                   normalized = `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
-                } else if (/^[A-Za-z0-9._~-]{1,256}$/.test(trimmed)) {
-                  // A bare authorization code (single URL-safe token). State is
-                  // not comparable without the URL — the gateway's single-use
-                  // + short-TTL code validation is the binding.
+                } else if (/^[A-Za-z0-9._~-]{1,256}={0,2}$/.test(trimmed)) {
+                  // A bare authorization code: a single URL-safe token, Base64
+                  // trailing padding allowed (roborev job 1850: `abc=` must not
+                  // be mistaken for a query string). State is not comparable
+                  // without the URL — the gateway's single-use + short-TTL code
+                  // validation is the binding.
                   normalized = `http://127.0.0.1/callback?code=${encodeURIComponent(trimmed)}`;
                 } else {
                   return failRemote("no code found in paste");
