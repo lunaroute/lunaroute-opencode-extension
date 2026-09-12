@@ -87,6 +87,68 @@ export type DocumentFormat =
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
+/** Recognized ZIP-based document containers, parsed properly (roborev
+ * follow-up on the byte-scan): the End of Central Directory is located, the
+ * central directory walked, and the container must match one of:
+ * - OOXML: an entry named exactly `[Content_Types].xml` plus an entry under
+ *   `word/`, `ppt/`, or `xl/`;
+ * - ODF: an entry named exactly `mimetype`, STORED (method 0, per spec),
+ *   whose content starts with `application/vnd.oasis.opendocument.`;
+ * - EPUB: the same `mimetype` entry with content exactly
+ *   `application/epub+zip`.
+ * Marker strings inside unrelated filenames or file data do not count.
+ * Malformed archives fail closed. */
+function recognizedZipContainer(bytes: Uint8Array): boolean {
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u16 = (o: number): number => (o >= 0 && o + 2 <= buf.length ? buf.readUInt16LE(o) : -1);
+  const u32 = (o: number): number => (o >= 0 && o + 4 <= buf.length ? buf.readUInt32LE(o) : -1);
+  // Locate the End of Central Directory (variable-length comment → scan the tail).
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 66000); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return false;
+  const count = u16(eocd + 10);
+  let offset = u32(eocd + 16);
+  if (count <= 0 || offset < 0 || offset >= buf.length) return false;
+  const names: string[] = [];
+  let mimetypeContent: string | undefined;
+  for (let i = 0; i < count; i++) {
+    if (u32(offset) !== 0x02014b50) return false;
+    const method = u16(offset + 10);
+    const nameLen = u16(offset + 28);
+    const extraLen = u16(offset + 30);
+    const commentLen = u16(offset + 32);
+    const localOffset = u32(offset + 42);
+    if (offset + 46 + nameLen > buf.length) return false;
+    const name = buf.toString("utf8", offset + 46, offset + 46 + nameLen);
+    names.push(name);
+    if (name === "mimetype" && method === 0) {
+      // The mimetype entry must be STORED; read its content through the
+      // local header (name/extra lengths are per-entry there).
+      const contentLen = u32(offset + 24); // uncompressed size == stored size
+      if (u32(localOffset) !== 0x04034b50) return false;
+      const lNameLen = u16(localOffset + 26);
+      const lExtraLen = u16(localOffset + 28);
+      const contentStart = localOffset + 30 + lNameLen + lExtraLen;
+      if (contentLen <= 0 || contentLen < 0 || contentStart < 0 || contentStart + contentLen > buf.length) return false;
+      mimetypeContent = buf.toString("latin1", contentStart, contentStart + contentLen);
+    }
+    offset += 46 + nameLen + extraLen + commentLen;
+    if (offset > buf.length) return false;
+  }
+  const isOoxml =
+    names.includes("[Content_Types].xml") &&
+    names.some((n) => n.startsWith("word/") || n.startsWith("ppt/") || n.startsWith("xl/"));
+  const mimetype = mimetypeContent;
+  const isOdf = mimetype !== undefined && mimetype.startsWith("application/vnd.oasis.opendocument.");
+  const isEpub = mimetype === "application/epub+zip";
+  return isOoxml || isOdf || isEpub;
+}
+
 /** Local format guard (the upload_image exfiltration precedent, amended in
  * the zpzt brainstorm): binary formats are sniffed by magic — ZIP-family
  * (docx/pptx/xlsx/odt/epub), PDF, RTF, raster images — and text must be
@@ -97,15 +159,12 @@ export function sniffDocumentFormat(bytes: Uint8Array): DocumentFormat | undefin
   if (bytes.length === 0) return undefined; // nothing to convert
   if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
     // ZIP-family: a bare PK marker accepts ANY archive — backups, credential
-    // bundles, things the server cannot convert — so require a recognized
-    // member structure before the bytes may leave (roborev this repo).
-    // Member NAMES are stored uncompressed in ZIP headers, so a byte scan is
-    // reliable for this gate; the server remains the format authority.
-    const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const ooxml = buffer.includes("[Content_Types].xml") && /(word\/|ppt\/|xl\/)/.test(buffer.toString("latin1"));
-    const odf = buffer.includes("opendocument"); // the ODF/EPUB mimetype entry is stored uncompressed by spec
-    const epub = buffer.includes("epub+zip");
-    if (ooxml || odf || epub) return { kind: "binary", format: "zip" };
+    // bundles, things the server cannot convert — and a byte-scan for marker
+    // strings is padded away by a hostile archive (roborev follow-up). The
+    // central directory is parsed and the container must match a recognized
+    // structure exactly; malformed → rejected (fail closed). The server
+    // remains the format authority.
+    if (recognizedZipContainer(bytes)) return { kind: "binary", format: "zip" };
     return undefined;
   }
   if (bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d) {

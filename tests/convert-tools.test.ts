@@ -140,12 +140,67 @@ const argsOf = (calls: RecordedCall[]) =>
   callBodies(calls, "tools/call").map((c) => (c.body.params as { arguments: Record<string, unknown> }).arguments);
 const outputOf = (r: ToolResult): string => (typeof r === "string" ? r : r.output);
 
-const ZIP_HEAD = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2]);
-const withZipName = (name: string) => new Uint8Array([...ZIP_HEAD, ...new TextEncoder().encode(name)]);
-const DOCX = withZipName("[Content_Types].xml word/document.xml");
-const ODT = withZipName("mimetype application/vnd.oasis.opendocument.text");
-const EPUB = withZipName("mimetype application/epub+zip");
-const PLAIN_ZIP = withZipName("backups/2024.tar notes.txt"); // no recognized structure → rejected
+/** Build a real ZIP (stored entries, central directory + EOCD) so the
+ * format guard's parser exercises actual structures, not byte scans. */
+function buildZip(entries: { name: string; content: string }[]): Uint8Array {
+  const enc = new TextEncoder();
+  const parts: Uint8Array[] = [];
+  const centrals: Uint8Array[] = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.name);
+    const content = enc.encode(e.content);
+    const local = new Uint8Array(30 + name.length + content.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(8, 0, true); // method: stored
+    lv.setUint32(18, content.length, true);
+    lv.setUint32(22, content.length, true);
+    lv.setUint16(26, name.length, true);
+    local.set(name, 30);
+    local.set(content, 30 + name.length);
+    parts.push(local);
+    const central = new Uint8Array(46 + name.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint32(20, content.length, true);
+    cv.setUint32(24, content.length, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint32(42, offset, true);
+    central.set(name, 46);
+    centrals.push(central);
+    offset += local.length;
+  }
+  const cdSize = centrals.reduce((n, c) => n + c.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, offset, true);
+  const all = [...parts, ...centrals, eocd];
+  const out = new Uint8Array(all.reduce((n, a) => n + a.length, 0));
+  let at = 0;
+  for (const part of all) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+const DOCX = buildZip([
+  { name: "[Content_Types].xml", content: "<Types/>" },
+  { name: "word/document.xml", content: "<w/>" },
+]);
+const ODT = buildZip([
+  { name: "mimetype", content: "application/vnd.oasis.opendocument.text" },
+  { name: "content.xml", content: "<x/>" },
+]);
+const EPUB = buildZip([{ name: "mimetype", content: "application/epub+zip" }]);
+const PADDED = buildZip([{ name: "notes.txt", content: "[Content_Types].xml word/ opendocument epub+zip" }]); // marker strings in data only
+const PLAIN_ZIP = buildZip([{ name: "backups/2024.tar", content: "tar-ish" }]);
+const WRONG_MIMETYPE = buildZip([{ name: "mimetype", content: "text/plain" }]);
 const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 1]);
 const RTF = new Uint8Array([0x7b, 0x5c, 0x72, 0x74, 0x66, 1]);
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
@@ -161,7 +216,12 @@ describe("sniffDocumentFormat", () => {
     expect(sniffDocumentFormat(DOCX)).toEqual({ kind: "binary", format: "zip" });
     expect(sniffDocumentFormat(ODT)).toEqual({ kind: "binary", format: "zip" });
     expect(sniffDocumentFormat(EPUB)).toEqual({ kind: "binary", format: "zip" });
-    expect(sniffDocumentFormat(PLAIN_ZIP)).toBeUndefined(); // unrecognized archive → never uploads
+    // Bypass attempts (roborev follow-up): marker strings in file DATA or
+    // unrelated names must not smuggle an arbitrary archive through.
+    expect(sniffDocumentFormat(PADDED)).toBeUndefined();
+    expect(sniffDocumentFormat(PLAIN_ZIP)).toBeUndefined();
+    expect(sniffDocumentFormat(WRONG_MIMETYPE)).toBeUndefined(); // mimetype entry must carry the exact magic
+    expect(sniffDocumentFormat(DOCX.subarray(0, DOCX.length - 30))).toBeUndefined(); // malformed → fail closed
     expect(sniffDocumentFormat(PDF)).toEqual({ kind: "binary", format: "pdf" });
     expect(sniffDocumentFormat(RTF)).toEqual({ kind: "binary", format: "rtf" });
     expect(sniffDocumentFormat(PNG)).toEqual({ kind: "binary", format: "image", mime: "image/png" });
