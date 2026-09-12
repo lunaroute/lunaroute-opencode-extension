@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   DEFAULT_SETTINGS,
+  SEARCH_PROVIDERS,
+  applySettingChange,
   applySettingsViaReload,
   convertToolsEnabled,
   imageToolsEnabled,
@@ -8,8 +10,10 @@ import {
   readSettings,
   resolveSearchProvider,
   resolveSettingsPath,
+  saveSettingsAndApply,
   webToolsEnabled,
   writeSettings,
+  type SettingsApplyClient,
   type SettingsIo,
 } from "../src/settings.js";
 
@@ -182,5 +186,69 @@ describe("applySettingsViaReload (live apply — spike-verified mechanism)", () 
     const { client: c, update } = client({}, false);
     await expect(applySettingsViaReload(c)).resolves.toBe("skipped-no-model");
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("applySettingChange (kata 7pd6)", () => {
+  it("flips each toggle and never mutates the input", () => {
+    const base = { ...DEFAULT_SETTINGS };
+    for (const key of ["mcp", "webTools", "imageTools", "convertTools"] as const) {
+      expect(applySettingChange(base, key)).toEqual({ ...base, [key]: "off" });
+      expect(applySettingChange({ ...base, [key]: "off" }, key)).toEqual(base);
+    }
+    expect(base).toEqual(DEFAULT_SETTINGS);
+  });
+  it("cycles the search provider through the known list and wraps", () => {
+    expect(SEARCH_PROVIDERS).toEqual(["server", "brave", "exa", "kagi"]);
+    let s = { ...DEFAULT_SETTINGS };
+    for (const expected of ["brave", "exa", "kagi", "server"]) {
+      s = applySettingChange(s, "searchProvider");
+      expect(s.searchProvider).toBe(expected);
+    }
+  });
+});
+
+describe("saveSettingsAndApply (write-first — kata 7pd6)", () => {
+  const events: string[] = [];
+  const ioWriting = (): SettingsIo => ({
+    randomUUID: () => "uuid",
+    readFileSync: () => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+    writeFileSync: () => void events.push("write"),
+    renameSync: () => void events.push("rename"),
+  });
+  const clientRecording = () => {
+    const update = vi.fn(async () => {
+      events.push("apply");
+      return {};
+    });
+    const c = { config: { get: async () => ({ data: { model: "m" } }), update } };
+    return { client: c as unknown as SettingsApplyClient, update };
+  };
+  it("writes the file, then triggers the reload — in that order", async () => {
+    events.length = 0;
+    const { client: c, update } = clientRecording();
+    const outcome = await saveSettingsAndApply(ENV, HOME, c, { ...DEFAULT_SETTINGS, webTools: "off" }, ioWriting());
+    expect(outcome).toBe("patched");
+    expect(events).toEqual(["write", "rename", "apply"]);
+    expect(update).toHaveBeenCalledWith({ config: { model: "m" } });
+  });
+  it("a failed write throws and never triggers the reload", async () => {
+    events.length = 0;
+    const io: SettingsIo = {
+      randomUUID: () => "uuid",
+      readFileSync: () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+      writeFileSync: () => {
+        throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      },
+      renameSync: () => void events.push("rename"),
+    };
+    const { client: c, update } = clientRecording();
+    await expect(saveSettingsAndApply(ENV, HOME, c, DEFAULT_SETTINGS, io)).rejects.toThrow("EACCES");
+    expect(update).not.toHaveBeenCalled();
+    expect(events).not.toContain("apply");
   });
 });

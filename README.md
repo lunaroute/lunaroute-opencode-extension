@@ -156,11 +156,32 @@ Environment escape hatches only ever **disable** (values `off`, `0`,
 - **Live apply**: provider selection applies to the very next tool call with
   no reload. Registration-time gates (web tools, MCP) re-evaluate when the
   instance reloads — a restart, a login, or any config change does it (the
-  plugin's own post-login config write triggers exactly this). The planned
-  `/lunaroute` settings command will write the file and trigger that reload
-  for you.
+  plugin's own post-login config write triggers exactly this).
 - **Isolation**: turning `mcp` off never affects models or the web tools —
   each contributor gates independently.
+
+### `/lunaroute` settings command (TUI)
+
+The package ships a TUI plugin (`exports["./tui"]`) that registers a
+`/lunaroute` slash command: it lists the five settings with their current
+values, and selecting one changes it — write-first, then the live-apply
+reload (a failed write never triggers the reload). It runs in the TUI
+process, outside the prompt loop, so it never spends a model turn.
+
+TUI plugins are declared in `tui.json`, **not** `opencode.json`:
+
+```jsonc
+// ~/.config/opencode/tui.json  (global)  or  <project>/.opencode/tui.json
+{ "plugin": ["@lunaroute/opencode-extension"] }
+```
+
+`opencode plugin @lunaroute/opencode-extension` writes that entry for you
+(it detects the server + TUI targets from the package manifest).
+
+**Headless / no TUI**: the command is simply absent — settings stay fully
+functional as the `lunaroute.json` file plus the env hatches above. Edit the
+file and restart (or trigger any config change) to apply registration-time
+gates; nothing depends on the TUI plugin.
 
 ## Web search (`web_search`)
 

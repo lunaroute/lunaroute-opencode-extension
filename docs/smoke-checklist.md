@@ -159,6 +159,32 @@ Settings file: `$XDG_DATA_HOME/opencode/lunaroute.json` (default
   on 1.18.25); confirm the npm-pack install path still works before
   release, and adjust the README install instructions if it regressed.
 
+## TUI settings command, `/lunaroute` (kata 7pd6)
+
+See README "Settings → `/lunaroute` settings command". The command runs in a
+TUI plugin declared in `tui.json` (`plugin` array); the dense loading-spike
+findings are in
+[docs/tui-plugin-loading-spike.md](./tui-plugin-loading-spike.md).
+
+- [ ] **T1 — Plugin loads + command present.** Install via
+  `opencode plugin @lunaroute/opencode-extension` (or the npm-name form from
+  the project's `node_modules`), confirm the entry is in `tui.json`, start the
+  TUI: typing `/lunaroute` shows "LunaRoute settings" (not "No matching
+  items"). **Unverified in the 7pd6 spike sandbox** — there the external TUI
+  module was never imported despite a correct manifest/`tui.json`; confirm on
+  a real published/installed package and record the result here.
+- [ ] **T2 — Settings list + write.** The dialog lists all five keys with
+  their current values; selecting a toggle flips it, persists
+  `lunaroute.json` (0600, tmp+rename), toasts success, and the list refreshes.
+- [ ] **T3 — Live apply.** Toggle `webTools` off from `/lunaroute`: the tool
+  disappears without a restart (mirrors the f2aj A/B/A in
+  docs/settings-live-apply-spike.md); toggle back on: it returns.
+- [ ] **T4 — Write-first on failure.** Make the settings file/dir unwritable
+  (e.g. `chmod 0500` the dir): toggling shows an error toast, leaves the file
+  unchanged, and does not trigger a reload.
+- [ ] **T5 — Headless fallback.** With the TUI plugin not loaded, `/lunaroute`
+  is absent and settings are still controlled by the file + env hatches.
+
 ## Image tools (kata 5715)
 
 - [ ] **I1 — All three registered.** Logged in + server offers them +

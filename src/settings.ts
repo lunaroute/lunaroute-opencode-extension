@@ -142,6 +142,46 @@ export function writeSettings(
 }
 
 // ============================================================================
+// Change applier (kata 7pd6 — the /lunaroute TUI command's core)
+// ============================================================================
+
+/** Keys of the settings object a user can change from the TUI. */
+export type SettingsKey = keyof LunarouteSettings;
+
+/** Next state for one setting: toggles flip, the search provider advances
+ * through SEARCH_PROVIDERS (cyclically). Pure — returns a new object. */
+export function applySettingChange(settings: LunarouteSettings, key: SettingsKey): LunarouteSettings {
+  switch (key) {
+    case "searchProvider": {
+      const i = SEARCH_PROVIDERS.indexOf(settings.searchProvider);
+      return { ...settings, searchProvider: SEARCH_PROVIDERS[(i + 1) % SEARCH_PROVIDERS.length] };
+    }
+    case "mcp":
+      return { ...settings, mcp: settings.mcp === "on" ? "off" : "on" };
+    case "webTools":
+      return { ...settings, webTools: settings.webTools === "on" ? "off" : "on" };
+    case "imageTools":
+      return { ...settings, imageTools: settings.imageTools === "on" ? "off" : "on" };
+    case "convertTools":
+      return { ...settings, convertTools: settings.convertTools === "on" ? "off" : "on" };
+  }
+}
+
+/** Write-first applier: persist the file, THEN trigger the instance reload.
+ * A write failure throws before any PATCH — the file is the source of truth,
+ * so a change that was not persisted must never look applied. */
+export async function saveSettingsAndApply(
+  env: NodeJS.ProcessEnv,
+  home: string,
+  client: SettingsApplyClient,
+  settings: LunarouteSettings,
+  io: SettingsIo = defaultIo,
+): Promise<SettingsApplyOutcome> {
+  writeSettings(env, home, settings, io);
+  return applySettingsViaReload(client);
+}
+
+// ============================================================================
 // Decisions (pure)
 // ============================================================================
 
