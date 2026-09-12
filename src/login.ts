@@ -133,6 +133,13 @@ export function createLunarouteAuth(opts: {
     log("warn", "LunaRoute login failed");
     return { type: "failed" };
   };
+  // Remote-browser callback: OpenCode prompts once and ends the flow on any
+  // {type:"failed"} (no re-prompt) — so every failure logs its exact reason to
+  // the instance log, making the forced /connect restart an informed one (dw0g).
+  const failRemote = (reason: string): { type: "failed" } => {
+    log("warn", `LunaRoute remote-browser login failed: ${reason}`);
+    return { type: "failed" };
+  };
 
   return {
     provider: "lunaroute",
@@ -209,21 +216,39 @@ export function createLunarouteAuth(opts: {
           return {
             url,
             instructions:
-              "Open the URL in any browser and approve. You'll be redirected to a 127.0.0.1 address that fails to load — that's expected. Paste that full URL (or its ?code=...&state=... part) back here.",
+              "Open the URL in any browser and approve, then paste back what the approval page gives you — its curl command, the callback URL, its ?code=...&state=... part, or a bare code all work. A failed paste ends the flow: re-run /connect for a fresh code.",
             method: "code" as const,
             callback: async (pasted: string): Promise<{ type: "success"; key: string } | { type: "failed" }> => {
               try {
                 const trimmed = pasted.trim();
-                if (!trimmed) return fail();
-                // Accept a full callback URL or a bare "code=..&state=.." query string.
-                const normalized = /^https?:/i.test(trimmed)
-                  ? trimmed
-                  : `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
+                if (!trimmed) return failRemote("nothing pasted");
+                // Extraction ladder (kata dw0g): the approval page's only copy
+                // artifact today is a curl command wrapping the callback URL;
+                // a paste may also be the bare URL, a code=...&state=... query,
+                // or (once the approval page ships it) a bare code.
+                const urlMatch = trimmed.match(/https?:\/\/[^\s'"]+/i);
+                let normalized: string;
+                if (urlMatch) {
+                  normalized = urlMatch[0];
+                } else if (/(?:^|[&?])(?:code|state)=/i.test(trimmed)) {
+                  // Accept a bare "code=..&state=.." query string (optional leading ?).
+                  normalized = `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
+                } else if (/^[A-Za-z0-9._~-]{1,256}={0,2}$/.test(trimmed)) {
+                  // A bare authorization code: a single URL-safe token, Base64
+                  // trailing padding allowed (roborev job 1850: `abc=` must not
+                  // be mistaken for a query string). State is not comparable
+                  // without the URL — the gateway's single-use + short-TTL code
+                  // validation is the binding.
+                  normalized = `http://127.0.0.1/callback?code=${encodeURIComponent(trimmed)}`;
+                } else {
+                  return failRemote("no code found in paste");
+                }
                 const cb = parseCallbackQuery(normalized);
-                if (!cb.code) return fail();
-                if (cb.state !== state) {
-                  log("warn", "LunaRoute remote-browser login failed: state mismatch");
-                  return fail();
+                if (!cb.code) return failRemote("no code found in paste");
+                // The state binds the paste to this attempt — enforce it only
+                // when the paste carries one (bare-code contract above).
+                if (new URL(normalized).searchParams.has("state") && cb.state !== state) {
+                  return failRemote("state mismatch");
                 }
                 const result = await d.exchange(resolveApiUrl(opts.env), {
                   code: cb.code,
@@ -232,11 +257,9 @@ export function createLunarouteAuth(opts: {
                 });
                 return succeed(result.full_key);
               } catch (err) {
-                log(
-                  "warn",
-                  `LunaRoute remote-browser login error: ${err instanceof Error ? err.message : String(err)}`,
-                );
-                return fail();
+                // The one-shot flow can't re-prompt, so the exact reason is the
+                // only thing the user gets before a forced /connect restart.
+                return failRemote(`exchange failed: ${err instanceof Error ? err.message : String(err)}`);
               }
             },
           };
