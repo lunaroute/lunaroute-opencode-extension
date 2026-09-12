@@ -87,6 +87,18 @@ export type DocumentFormat =
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
+/** The ODF document mimetype allowlist (the documented OpenDocument family
+ * the server converts). */
+const ODF_MIMETYPES: ReadonlySet<string> = new Set([
+  "application/vnd.oasis.opendocument.text",
+  "application/vnd.oasis.opendocument.spreadsheet",
+  "application/vnd.oasis.opendocument.presentation",
+  "application/vnd.oasis.opendocument.graphics",
+  "application/vnd.oasis.opendocument.chart",
+  "application/vnd.oasis.opendocument.formula",
+  "application/vnd.oasis.opendocument.image",
+]);
+
 /** Recognized ZIP-based document containers, parsed properly (roborev
  * follow-up on the byte-scan): the End of Central Directory is located, the
  * central directory walked, and the container must match one of:
@@ -155,7 +167,10 @@ function recognizedZipContainer(bytes: Uint8Array): boolean {
     names.includes("[Content_Types].xml") &&
     names.some((n) => n.startsWith("word/") || n.startsWith("ppt/") || n.startsWith("xl/"));
   const mimetype = mimetypeContent;
-  const isOdf = mimetype !== undefined && mimetype.startsWith("application/vnd.oasis.opendocument.");
+  // ODF subtypes are allowlisted exactly — a fabricated
+  // application/vnd.oasis.opendocument.not-a-document must not pass
+  // (roborev follow-up round 3).
+  const isOdf = mimetype !== undefined && ODF_MIMETYPES.has(mimetype);
   const isEpub = mimetype === "application/epub+zip";
   return isOoxml || isOdf || isEpub;
 }

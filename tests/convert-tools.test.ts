@@ -221,6 +221,8 @@ describe("sniffDocumentFormat", () => {
     expect(sniffDocumentFormat(PADDED)).toBeUndefined();
     expect(sniffDocumentFormat(PLAIN_ZIP)).toBeUndefined();
     expect(sniffDocumentFormat(WRONG_MIMETYPE)).toBeUndefined(); // mimetype entry must carry the exact magic
+    const FABRICATED_ODF = buildZip([{ name: "mimetype", content: "application/vnd.oasis.opendocument.not-a-document" }]);
+    expect(sniffDocumentFormat(FABRICATED_ODF)).toBeUndefined(); // ODF subtypes are allowlisted exactly
     expect(sniffDocumentFormat(DOCX.subarray(0, DOCX.length - 30))).toBeUndefined(); // malformed → fail closed
     // mimetype must be the FIRST local entry with a matching local name and sizes
     const WRONG_MIMETYPE_SECOND = buildZip([
