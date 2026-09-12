@@ -257,11 +257,9 @@ export function createLunarouteAuth(opts: {
                 });
                 return succeed(result.full_key);
               } catch (err) {
-                log(
-                  "warn",
-                  `LunaRoute remote-browser login error: ${err instanceof Error ? err.message : String(err)}`,
-                );
-                return fail();
+                // The one-shot flow can't re-prompt, so the exact reason is the
+                // only thing the user gets before a forced /connect restart.
+                return failRemote(`exchange failed: ${err instanceof Error ? err.message : String(err)}`);
               }
             },
           };

@@ -281,6 +281,25 @@ describe("remote-browser method (pi #6 parity)", () => {
     expect(logs.some((l) => l.message === "LunaRoute remote-browser login failed: no code found in paste")).toBe(true);
   });
 
+  it("a rejected exchange (expired/invalid code) fails with the exact gateway reason, not the generic message (roborev job 1852)", async () => {
+    const logs: { level: string; message: string }[] = [];
+    const exchange = vi.fn(async () => {
+      throw new Error("HTTP 401: invalid or expired code");
+    });
+    const { auth, onLoginSuccess } = makeAuth({
+      log: (level, message) => logs.push({ level, message }),
+      deps: { exchange: exchange as never },
+    });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("raw-code")).toEqual({ type: "failed" });
+    expect(exchange).toHaveBeenCalledTimes(1);
+    expect(onLoginSuccess).not.toHaveBeenCalled();
+    expect(
+      logs.some((l) => l.message === "LunaRoute remote-browser login failed: exchange failed: HTTP 401: invalid or expired code"),
+    ).toBe(true);
+    expect(logs.some((l) => l.message === "LunaRoute login failed")).toBe(false);
+  });
+
   it("reason-specific failure logs: no-code vs state mismatch", async () => {
     const logs: { level: string; message: string }[] = [];
     const exchange = vi.fn(async () => goodExchange);
