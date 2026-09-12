@@ -462,7 +462,7 @@ describe("web tools wiring (kata gygp)", () => {
       const { plugin, logs } = makePlugin({ fs, storeKey: AUTH_PATH });
       const hooks = await plugin({});
       expect(Object.keys(hooks.tool ?? {})).toEqual([]);
-      expect(logs.some((l) => l.level === "warn" && /web tools not registered/.test(l.message))).toBe(true);
+      expect(logs.some((l) => l.level === "warn" && /first-class tools not registered/.test(l.message))).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

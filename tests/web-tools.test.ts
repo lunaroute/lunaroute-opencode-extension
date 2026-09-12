@@ -172,6 +172,14 @@ describe("createLunarouteMcpClient", () => {
     await expect(client.listTools()).resolves.toEqual(["last"]);
   });
 
+  it("listToolDescriptors returns name + inputSchema (kata 5715 enum baking)", async () => {
+    const { fetchImpl, calls } = fakeMcp({ tools: ["generate_image"] });
+    const client = createLunarouteMcpClient({ url: "http://mcp", headers: {}, fetchImpl });
+    const descriptors = await client.listToolDescriptors();
+    expect(descriptors).toEqual([{ name: "generate_image", inputSchema: undefined }]);
+    expect(callBodies(calls, "tools/list")).toHaveLength(1);
+  });
+
   it("callTool: name + arguments on the wire; isError → throws with content text; no result → throws", async () => {
     const { fetchImpl, calls } = fakeMcp({ tools: ["web_search"], callResult: () => ({ content: [{ type: "text", text: "ok" }] }) });
     const client = createLunarouteMcpClient({ url: "http://mcp", headers: {}, fetchImpl });
@@ -329,6 +337,15 @@ describe("buildWebToolMap", () => {
     const b = fakeMcp({ tools: ["web_search"] });
     const mapB = await buildWebToolMap(makeDeps(b.fetchImpl, { env: { LUNAROUTE_MCP_WEB_SEARCH_TOOL: "my_search" } }));
     expect(mapB).toEqual({}); // override not in tools/list → no pattern fallback
+  });
+
+  it("pre-fetched descriptors skip the probe entirely (shared single probe — kata 5715)", async () => {
+    const { fetchImpl, calls } = fakeMcp({ tools: ["web_search"] });
+    const map = await buildWebToolMap(
+      makeDeps(fetchImpl, { descriptors: [{ name: "web_search", inputSchema: undefined }] }),
+    );
+    expect(Object.keys(map)).toEqual(["web_search"]);
+    expect(calls).toHaveLength(0); // no initialize/tools-list traffic at all
   });
 });
 
