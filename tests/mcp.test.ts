@@ -256,3 +256,125 @@ describe("redaction", () => {
     }
   });
 });
+
+describe("defer to any same-URL server (kata h4j3)", () => {
+  function setup() {
+    const logs: { level: string; message: string }[] = [];
+    const log = (level: "info" | "warn", message: string) => logs.push({ level, message });
+    const r = createMcpReconciler(MCP_URL, log, "sess-1");
+    return { r, logs };
+  }
+  const SK = "/store/auth.json";
+  const foreignEntry = (url: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    type: "remote",
+    url,
+    headers: { "X-USER-KEY": "user-static-key" },
+    oauth: false,
+    enabled: true,
+    ...extra,
+  });
+  const notices = (logs: { level: string; message: string }[]) =>
+    logs.filter((l) => /deferring to it/.test(l.message));
+  const V = { state: "valid", key: KEY_A } as const;
+
+  it("foreign name + same URL → no write by the plugin, one-time notice", () => {
+    const { r, logs } = setup();
+    const cfg: Record<string, unknown> = { mcp: { "my-lunaroute": foreignEntry(MCP_URL) } };
+    r.reconcile(cfg, V, SK);
+    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
+    expect(notices(logs)).toHaveLength(1);
+    // second run (same instance reload): no second notice, still no write
+    const cfg2: Record<string, unknown> = { mcp: { "my-lunaroute": foreignEntry(MCP_URL) } };
+    r.reconcile(cfg2, V, SK);
+    expect((cfg2.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
+    expect(notices(logs)).toHaveLength(1);
+  });
+
+  it("URL tolerance: case + trailing slash match; http and different path don't", () => {
+    const { r, logs } = setup();
+    const cfg: Record<string, unknown> = { mcp: { other: foreignEntry("HTTPS://MCP.Lunaroute.com/mcp/") } };
+    r.reconcile(cfg, V, SK);
+    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
+    expect(notices(logs)).toHaveLength(1);
+
+    const { r: r2, logs: logs2 } = setup();
+    const cfg2: Record<string, unknown> = { mcp: { other: foreignEntry("http://mcp.lunaroute.com/mcp") } };
+    r2.reconcile(cfg2, V, SK);
+    expect((cfg2.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
+    expect(notices(logs2)).toHaveLength(0);
+
+    const { r: r3 } = setup();
+    const cfg3: Record<string, unknown> = { mcp: { other: foreignEntry("https://mcp.lunaroute.com/other") } };
+    r3.reconcile(cfg3, V, SK);
+    expect((cfg3.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
+  });
+
+  it("foreign name + different URL → plugin registration proceeds as today", () => {
+    const { r, logs } = setup();
+    const cfg: Record<string, unknown> = { mcp: { "unrelated": foreignEntry("https://example.com/mcp") } };
+    r.reconcile(cfg, V, SK);
+    expect((cfg.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
+    expect(notices(logs)).toHaveLength(0);
+  });
+
+  it("managed-shape mcp.lunaroute → still refreshed (no regression)", () => {
+    const { r, logs } = setup();
+    const cfg = cfgWith(managedEntry(KEY_A));
+    r.reconcile(cfg, { state: "valid", key: KEY_B }, SK);
+    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute as { headers: Record<string, string> };
+    expect(entry.headers["LUNAROUTE-API-KEY"]).toBe(KEY_B);
+    expect(notices(logs)).toHaveLength(0);
+  });
+
+  it("late-appearing foreign same-URL entry after we registered → ours removed (credential ours), user entry untouched", () => {
+    const { r, logs } = setup();
+    const cfg: Record<string, unknown> = {};
+    r.reconcile(cfg, V, SK); // we register
+    expect((cfg.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
+    (cfg.mcp as Record<string, unknown>)["my-lunaroute"] = foreignEntry(MCP_URL);
+    r.reconcile(cfg, V, SK); // foreign appears later
+    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined(); // ours removed
+    expect((cfg.mcp as Record<string, unknown>)["my-lunaroute"]).toBeDefined(); // user's untouched
+    expect(logs.some((l) => /removed our duplicate/.test(l.message))).toBe(true);
+    expect(notices(logs)).toHaveLength(1);
+  });
+
+  it("late-appearing foreign + unknown credential in our entry → left untouched with info", () => {
+    const { r, logs } = setup();
+    const cfg: Record<string, unknown> = {};
+    r.reconcile(cfg, V, SK);
+    // the managed entry's key is swapped behind our back (not a fingerprint we placed)
+    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute as { headers: Record<string, string> };
+    entry.headers["LUNAROUTE-API-KEY"] = "lr_not_ours";
+    (cfg.mcp as Record<string, unknown>)["my-lunaroute"] = foreignEntry(MCP_URL);
+    r.reconcile(cfg, V, SK);
+    expect((cfg.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined(); // left, not ours to remove
+    expect(logs.some((l) => /unknown credential/.test(l.message))).toBe(true);
+    expect(notices(logs)).toHaveLength(1);
+  });
+
+  it("logout with a foreign same-URL entry present → ours removed (if placed), user entry untouched", () => {
+    const { r } = setup();
+    const cfg: Record<string, unknown> = {};
+    r.reconcile(cfg, V, SK); // we place ours
+    (cfg.mcp as Record<string, unknown>)["my-lunaroute"] = foreignEntry(MCP_URL);
+    r.reconcile(cfg, { state: "logged-out" }, SK);
+    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined(); // ours removed
+    expect((cfg.mcp as Record<string, unknown>)["my-lunaroute"]).toBeDefined(); // user's survives
+  });
+
+  it("user-owned exact-name entry + foreign same-URL → plugin stays out entirely", () => {
+    const { r, logs } = setup();
+    const cfg: Record<string, unknown> = {
+      mcp: {
+        lunaroute: foreignEntry(MCP_URL), // diverged shape (different headers) at our name
+        "my-lunaroute": foreignEntry(MCP_URL),
+      },
+    };
+    r.reconcile(cfg, V, SK);
+    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute as { headers: Record<string, string> };
+    expect(entry.headers["X-USER-KEY"]).toBe("user-static-key"); // untouched
+    expect(logs.some((l) => /user-defined mcp.lunaroute in effect/.test(l.message))).toBe(true);
+    expect(notices(logs)).toHaveLength(1);
+  });
+});
