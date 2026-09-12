@@ -278,9 +278,22 @@ describe("saveImage permissions (real fs)", () => {
     try {
       const dir = join(base, "images");
       mkdirSync(dir, { recursive: true, mode: 0o755 }); // old-install shape
-      const path = await saveImage(dir, "img_perm", "png", PNG, defaultIo);
+      const path = await saveImage(dir, "img_perm", "png", PNG, defaultIo, undefined, true);
       expect(path).toBeDefined();
       expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(statSync(path as string).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+  it("override dir (LUNAROUTE_IMAGE_DIR): mode respected, file still 0600", async () => {
+    const base = mkdtempSync(join(tmpdir(), "lr-img-perm-"));
+    try {
+      const dir = join(base, "shared");
+      mkdirSync(dir, { recursive: true, mode: 0o755 });
+      const path = await saveImage(dir, "img_shared", "png", PNG, defaultIo, undefined, false);
+      expect(path).toBeDefined();
+      expect(statSync(dir).mode & 0o777).toBe(0o755); // user-managed: untouched
       expect(statSync(path as string).mode & 0o777).toBe(0o600);
     } finally {
       rmSync(base, { recursive: true, force: true });
@@ -335,6 +348,26 @@ describe("buildImageToolMap", () => {
     const map = await buildImageToolMap(makeDeps(fetchImpl, { log: (l, m) => logs.push({ level: l, message: m }) }));
     expect(map).toEqual({});
     expect(logs.some((l) => l.level === "warn" && /image tools not registered/.test(l.message))).toBe(true);
+  });
+
+  it("dir hardening: plugin-owned default → chmod on save; explicit override → left alone", async () => {
+    const inlinePng = () => ({
+      content: [
+        { type: "text", text: generateText("img_h") },
+        { type: "image", data: Buffer.from(PNG).toString("base64") },
+      ],
+    });
+    const a = fakeMcp({ tools: allThree(["m1"]), callResult: inlinePng });
+    const ioA = makeIo();
+    const mapA = await buildImageToolMap(makeDeps(a.fetchImpl, { env: {}, io: ioA, descriptors: allThree(["m1"]) }));
+    await mapA.generate_image.execute({ prompt: "x", model: "m1" }, ctx());
+    expect(ioA.chmods).toEqual([{ path: "/fake/home/.local/share/opencode/lunaroute-images", mode: 0o700 }]);
+
+    const b = fakeMcp({ tools: allThree(["m1"]), callResult: inlinePng });
+    const ioB = makeIo();
+    const mapB = await buildImageToolMap(makeDeps(b.fetchImpl, { io: ioB, descriptors: allThree(["m1"]) }));
+    await mapB.generate_image.execute({ prompt: "x", model: "m1" }, ctx());
+    expect(ioB.chmods).toEqual([]); // LUNAROUTE_IMAGE_DIR override is user-managed
   });
 
   it("server without the image tools → nothing registered", async () => {

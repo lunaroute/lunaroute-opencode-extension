@@ -221,7 +221,10 @@ the server's `tools/list`, checked on every session start).
   validated (`img_…` only) before anything touches a filesystem path.
 - **Save location**: `$XDG_DATA_HOME/opencode/lunaroute-images` (default
   `~/.local/share/opencode/lunaroute-images`), override with
-  `LUNAROUTE_IMAGE_DIR`.
+  `LUNAROUTE_IMAGE_DIR`. Saved images are private by default (dir 0700 /
+  files 0600); the plugin-owned default directory is hardened on every
+  save, while an explicit `LUNAROUTE_IMAGE_DIR` is respected as-is
+  (user-managed).
 - **Key rotation**: the current key is re-read on every call — no restart
   needed.
 - **Disable**: `LUNAROUTE_IMAGE_TOOLS=off` / `{"imageTools": "off"}` —

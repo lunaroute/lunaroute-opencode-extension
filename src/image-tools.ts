@@ -316,6 +316,11 @@ export async function saveImage(
   bytes: Uint8Array,
   io: ImageIo,
   signal?: AbortSignal,
+  /** Harden the DIRECTORY to 0700 — only for the plugin-owned default dir.
+   * An explicit LUNAROUTE_IMAGE_DIR may point at a shared path the user
+   * manages; clamping its mode would disrupt others (roborev follow-up).
+   * File contents stay 0600-private either way. */
+  hardenDir = false,
 ): Promise<string | undefined> {
   if (!IMAGE_ID_PATTERN.test(id)) return undefined;
   if (signal?.aborted) return undefined;
@@ -332,7 +337,7 @@ export async function saveImage(
     // pre-0755 dir too; the plugin owns this namespace (LUNAROUTE_IMAGE_DIR
     // exists for anyone who wants different semantics).
     await io.mkdir(dir, { recursive: true, mode: 0o700 });
-    await io.chmod(dir, 0o700).catch(() => {});
+    if (hardenDir) await io.chmod(dir, 0o700).catch(() => {});
     // Re-check before the write: an abort landing between the download
     // resolving and this point must not leave a file behind (job 1661).
     if (signal?.aborted) return undefined;
@@ -379,6 +384,9 @@ export interface ImageToolExecuteDeps {
   /** Resolved save directory (gate-time: LUNAROUTE_IMAGE_DIR or the
    * XDG-data anchor). */
   imageDir: string;
+  /** Harden the save directory to 0700 on every save — true only for the
+   * plugin-owned default dir, never for an explicit LUNAROUTE_IMAGE_DIR. */
+  hardenDir?: boolean;
   fetchImpl?: FetchLike;
   io?: ImageIo;
   /** Per-org model enum + hints from tools/list (kata e30g enum baking). */
@@ -465,7 +473,7 @@ async function finishImageCall(
   let path: string | undefined;
   if (bytes && parsed.id && !signal?.aborted) {
     try {
-      path = await saveImage(deps.imageDir, parsed.id, parsed.format, bytes, deps.io ?? defaultIo, signal);
+      path = await saveImage(deps.imageDir, parsed.id, parsed.format, bytes, deps.io ?? defaultIo, signal, deps.hardenDir);
     } catch {
       // Best-effort: the id + url still go out.
     }
@@ -639,12 +647,15 @@ export async function buildImageToolMap(deps: ImageToolMapDeps): Promise<Record<
 
   const byName = new Map(descriptors.map((d) => [d.name, d]));
   const imageDir = resolveImageDir(deps.env, deps.home);
+  const override = deps.env[LUNAROUTE_ENV_IMAGE_DIR];
+  const hardenDir = !(typeof override === "string" && override); // only the plugin-owned default dir is ours to clamp
   const map: Record<string, ToolDefinition> = {};
   if (byName.has("generate_image")) {
     map.generate_image = buildGenerateImageTool({
       mcpToolName: "generate_image",
       callServer,
       imageDir,
+      hardenDir,
       fetchImpl,
       io: deps.io,
       modelEnum: extractModelEnum(byName.get("generate_image")?.inputSchema),
@@ -655,6 +666,7 @@ export async function buildImageToolMap(deps: ImageToolMapDeps): Promise<Record<
       mcpToolName: "edit_image",
       callServer,
       imageDir,
+      hardenDir,
       fetchImpl,
       io: deps.io,
       modelEnum: extractModelEnum(byName.get("edit_image")?.inputSchema),
