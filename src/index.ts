@@ -16,6 +16,12 @@ import { buildConvertToolMap } from "./convert-tools.js";
 import { buildImageToolMap } from "./image-tools.js";
 import { buildWebToolMap, listServerToolDescriptors } from "./web-tools.js";
 
+/** Placeholder model label for a logged-in user whose catalog could not be
+ * loaded (fetch failure or empty catalog) — distinct from the logged-out
+ * "Log in to load models" default. Keeps the provider visible in /connect
+ * instead of being dropped as a zero-model provider (kata 3xsy). */
+const UNAVAILABLE_MODELS_NAME = "Couldn't load models — check connection and restart";
+
 export type PluginLog = (level: "info" | "warn", message: string) => void;
 
 /**
@@ -260,12 +266,21 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
               const result = await catalogMemo(effectiveRoutingUrl, resolution.key);
               if ("error" in result) {
                 log("warn", `LunaRoute: catalog fetch failed: ${result.error}`);
+                // Never leave the stub with zero models: OpenCode drops zero-model
+                // providers from its provider state, which would hide LunaRoute from
+                // /connect and /models entirely (kata 3xsy). injectPlaceholderModel
+                // is a no-op when models already exist, so a retained catalog is safe.
+                injectPlaceholderModel(cfg, effectiveRoutingUrl, UNAVAILABLE_MODELS_NAME);
               } else {
                 for (const s of result.skipped) log("warn", `LunaRoute: skipped catalog entry "${s.id}": ${s.reason}`);
                 if (result.skipped.length && !result.models.length) {
                   log("warn", `LunaRoute: catalog had ${result.skipped.length} invalid entries, all skipped`);
                 }
-                injectModels(cfg, result.models, effectiveRoutingUrl);
+                if (result.models.length > 0) {
+                  injectModels(cfg, result.models, effectiveRoutingUrl);
+                } else {
+                  injectPlaceholderModel(cfg, effectiveRoutingUrl, UNAVAILABLE_MODELS_NAME);
+                }
               }
             } else {
               // logged-out / indeterminate: existing models stay untouched (fail-safe

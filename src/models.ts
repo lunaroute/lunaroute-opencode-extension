@@ -84,11 +84,14 @@ export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: st
 export const PLACEHOLDER_MODEL_ID = "login";
 
 /** Pre-login placeholder: OpenCode drops zero-model providers from its provider
- * state, which hides a config-only provider from /connect entirely (dpd0). A
+ * state, which hides a config-only provider from /connect entirely (dpd0). The
+ * name parameter lets callers distinguish "not logged in yet" from "logged in
+ * but the catalog could not be loaded" (kata 3xsy: a valid key plus a failed
+ * or empty catalog must not silently hide the provider).
  * single labeled placeholder keeps the provider connectable and tells the user
  * what to do. Additive-only: existing models (user-written or catalog) always
  * win; the post-login catalog replaces the placeholder wholesale. */
-export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string): boolean {
+export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string, name = "Log in to load models"): boolean {
   const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
   cfg.provider = providers;
   const provider = providers[LUNAROUTE_PROVIDER] ?? {};
@@ -98,7 +101,7 @@ export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string): boolea
     [
       {
         id: PLACEHOLDER_MODEL_ID,
-        name: "Log in to load models",
+        name,
         reasoning: false,
         tool_call: true,
         attachment: false,

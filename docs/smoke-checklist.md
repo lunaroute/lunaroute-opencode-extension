@@ -44,10 +44,16 @@ Where to look:
 
 ## Pre-login onboarding (dpd0)
 
-- [ ] **P1 — `/connect` lists LunaRoute before first login.** Fresh machine
+- [x] **P1 — `/connect` lists LunaRoute before first login.** Fresh machine
   state (no `lunaroute` entry in auth.json, plugin-only config): open the
   TUI, run `/connect` — LunaRoute must appear in the provider list;
   selecting it must show the three login methods.
+  *Verified 2026-09-12 on OpenCode 1.18.30 (kata 3xsy): fresh XDG sandbox,
+  npm-name install of published 0.1.2 → `GET /provider` (the exact list the
+  TUI /connect dialog renders, source-verified dialog-provider.tsx) lists
+  `lunaroute` with the `login` placeholder model. TUI dialog itself not
+  driven interactively (headless verify). Login-method picker not exercised
+  (covered by 0b/1).*
 - [ ] **P2 — `/models` pre-login shows exactly one LunaRoute entry:**
   "Log in to load models" (the placeholder), no catalog entries.
 - [ ] **P3 — Placeholder replaced after login.** Complete the login (see
@@ -85,10 +91,23 @@ Where to look:
   no catalog models (exactly the "Log in to load models" placeholder
   remains, and `/connect` still lists LunaRoute), one info log line ("Run
   /connect..."), no errors.
-- [ ] **6 — Install from the packed tarball.** `npm pack`, then install the
+- [x] **6 — Install from the packed tarball.** `npm pack`, then install the
   tarball into a fresh OpenCode (config `plugin` array pointing at the
   tarball path) — not a repo checkout. The plugin loads and `/connect`
   works. Proves the package loads from npm.
+  *Verified 2026-09-12 on OpenCode 1.18.30 (kata 3xsy): REGRESSED — the
+  tarball-path entry does not load at all (silent, zero log lines;
+  `lunaroute` absent from `GET /provider`). Loaded on 1.18.25 per the
+  compat spike. The npm-name form (`"@lunaroute/opencode-extension"`)
+  is the only working install form on ≥ 1.18.30 and is the only one the
+  README documents; package-cache poisoning below also found.*
+  *Cache finding: `Npm.add` (opencode core/src/npm.ts) returns an existing
+  `<cache>/opencode/packages/@lunaroute/opencode-extension@latest` dir
+  without ever re-checking npm — any cached pre-0.1.2 copy (no placeholder
+  model) keeps running and hides LunaRoute from `/connect`. Reproduced and
+  verified: `rm -rf ~/.cache/opencode/packages/@lunaroute` → next start
+  fetches fresh 0.1.2 → provider lists again. Documented in README
+  Troubleshooting.*
 - [ ] **7 — No secrets in config files.** After login + the post-login
   default-model update: no config file contains the key or an
   `mcp.lunaroute` entry written by the plugin; the instance `config.json`
@@ -153,11 +172,15 @@ Settings file: `$XDG_DATA_HOME/opencode/lunaroute.json` (default
 - [ ] **S4 — Default-model feedback.** Fresh state (no default model set),
   `/connect` login: the instance log records the auto-pick ("set
   lunaroute/<id> as the default model (change with /models)").
-- [ ] **S5 — Re-verify item 6 on OpenCode 1.18.30.** The live-apply spike
+- [x] **S5 — Re-verify item 6 on OpenCode 1.18.30.** The live-apply spike
   ([docs/settings-live-apply-spike.md](./settings-live-apply-spike.md))
   observed tarball-path plugin entries NOT loading on 1.18.30 (they loaded
   on 1.18.25); confirm the npm-pack install path still works before
   release, and adjust the README install instructions if it regressed.
+  *Verified 2026-09-12 (kata 3xsy): regression confirmed — tarball path
+  silently does not load on 1.18.30 (see item 6). README already documents
+  npm-name only; unchanged. The npm-name form verified working on 1.18.30
+  with published 0.1.2 (P1) and with the stale-cache recovery path.*
 
 ## TUI settings command, `/lunaroute` (kata 7pd6)
 
