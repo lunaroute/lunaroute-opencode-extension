@@ -1,6 +1,6 @@
 import { tool, type ToolDefinition, type ToolResult } from "@opencode-ai/plugin";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AuthResolution } from "./mcp.js";
@@ -210,8 +210,9 @@ function mimeForFormat(format: string): string {
 }
 
 export interface ImageIo {
-  mkdir(path: string, options: { recursive: boolean }): Promise<void>;
-  writeFile(path: string, data: Uint8Array): Promise<void>;
+  mkdir(path: string, options: { recursive: boolean; mode?: number }): Promise<void>;
+  writeFile(path: string, data: Uint8Array, options?: { mode?: number }): Promise<void>;
+  chmod(path: string, mode: number): Promise<void>;
   /** Atomic rename (same-filesystem) for the temp-then-rename save. */
   rename(from: string, to: string): Promise<void>;
   /** Best-effort removal (temp cleanup). */
@@ -246,7 +247,12 @@ export const defaultIo: ImageIo = {
   mkdir: async (path, options) => {
     await mkdir(path, options);
   },
-  writeFile,
+  writeFile: async (path, data, options) => {
+    await writeFile(path, data, options);
+  },
+  chmod: async (path, mode) => {
+    await chmod(path, mode);
+  },
   rename,
   rm,
   // Descriptor-based bounded read: one open, positional reads capped at
@@ -303,7 +309,7 @@ export async function fetchImageBytes(
  * filesystem path (pi roborev job 1649). */
 const IMAGE_ID_PATTERN = /^img_[0-9A-Za-z]+$/;
 
-async function saveImage(
+export async function saveImage(
   dir: string,
   id: string,
   format: string,
@@ -319,11 +325,18 @@ async function saveImage(
   const path = join(dir, `${id}${extForFormat(format)}`);
   const tmp = `${path}.${randomUUID()}.tmp`;
   try {
-    await io.mkdir(dir, { recursive: true });
+    // Private by default (roborev job on this repo): generated images are
+    // the user's own artifacts — dir 0700, file 0600 (Node's defaults would
+    // land 0755/0644 under a typical umask, readable by other local users).
+    // mkdir does not touch an already-existing dir, so the chmod hardens a
+    // pre-0755 dir too; the plugin owns this namespace (LUNAROUTE_IMAGE_DIR
+    // exists for anyone who wants different semantics).
+    await io.mkdir(dir, { recursive: true, mode: 0o700 });
+    await io.chmod(dir, 0o700).catch(() => {});
     // Re-check before the write: an abort landing between the download
     // resolving and this point must not leave a file behind (job 1661).
     if (signal?.aborted) return undefined;
-    await io.writeFile(tmp, bytes);
+    await io.writeFile(tmp, bytes, { mode: 0o600 });
     if (signal?.aborted) {
       await io.rm(tmp).catch(() => {});
       return undefined;

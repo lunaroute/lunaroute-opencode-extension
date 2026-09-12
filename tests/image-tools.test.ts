@@ -1,14 +1,19 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ToolContext } from "@opencode-ai/plugin";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_SETTINGS } from "../src/settings.js";
 import {
   buildImageToolMap,
+  defaultIo,
   extractModelEnum,
   fetchImageBytes,
   parseImageResultText,
   parseUploadResultText,
   readUntilLimit,
   resolveImageDir,
+  saveImage,
   sniffImageMime,
   UPLOAD_MAX_BYTES,
   DOWNLOAD_MAX_BYTES,
@@ -69,23 +74,29 @@ function fakeMcp(routes: FakeMcpRoutes = {}) {
 }
 
 const makeIo = (): ImageIo & {
-  writes: { path: string; data: Uint8Array }[];
+  writes: { path: string; data: Uint8Array; mode?: number }[];
   renames: [string, string][];
   rms: string[];
   bounded: Map<string, Uint8Array>;
+  chmods: { path: string; mode: number }[];
 } => {
-  const writes: { path: string; data: Uint8Array }[] = [];
+  const writes: { path: string; data: Uint8Array; mode?: number }[] = [];
   const renames: [string, string][] = [];
   const rms: string[] = [];
   const bounded = new Map<string, Uint8Array>();
+  const chmods: { path: string; mode: number }[] = [];
   return {
     writes,
     renames,
     rms,
     bounded,
+    chmods,
     mkdir: async () => {},
-    writeFile: async (path, data) => {
-      writes.push({ path, data: data });
+    writeFile: async (path, data, options) => {
+      writes.push({ path, data: data, mode: options?.mode });
+    },
+    chmod: async (path, mode) => {
+      chmods.push({ path, mode });
     },
     rename: async (from, to) => {
       renames.push([from, to]);
@@ -258,6 +269,22 @@ describe("resolveImageDir", () => {
     expect(resolveImageDir({ LUNAROUTE_IMAGE_DIR: "/custom" }, "/h")).toBe("/custom");
     expect(resolveImageDir({}, "/h")).toBe("/h/.local/share/opencode/lunaroute-images");
     expect(resolveImageDir({ XDG_DATA_HOME: "/xdg" }, "/h")).toBe("/xdg/opencode/lunaroute-images");
+  });
+});
+
+describe("saveImage permissions (real fs)", () => {
+  it("dir 0700, file 0600; a pre-existing 0755 dir is hardened on save", async () => {
+    const base = mkdtempSync(join(tmpdir(), "lr-img-perm-"));
+    try {
+      const dir = join(base, "images");
+      mkdirSync(dir, { recursive: true, mode: 0o755 }); // old-install shape
+      const path = await saveImage(dir, "img_perm", "png", PNG, defaultIo);
+      expect(path).toBeDefined();
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+      expect(statSync(path as string).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 
