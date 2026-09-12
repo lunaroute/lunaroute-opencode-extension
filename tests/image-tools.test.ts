@@ -98,6 +98,7 @@ const makeIo = (): ImageIo & {
     chmod: async (path, mode) => {
       chmods.push({ path, mode });
     },
+    link: async () => {},
     rename: async (from, to) => {
       renames.push([from, to]);
     },

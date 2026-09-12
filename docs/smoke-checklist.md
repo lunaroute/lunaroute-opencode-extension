@@ -181,6 +181,24 @@ Settings file: `$XDG_DATA_HOME/opencode/lunaroute.json` (default
 - [ ] **I6 — Edit flow.** generate → pass the id to edit_image → new id +
   saved file; upload a local png → id → edit it.
 
+## Document conversion (kata gv7t)
+
+- [ ] **C1 — Registered + inline conversion.** Logged in + server offers it
+  + restart: `convert_document` callable; a docx/pdf converts to inline
+  Markdown; the MCP duplicate (`lunaroute_convert_document`) also exists —
+  expected, documented endgame.
+- [ ] **C2 — Local safety.** Point `path` at a non-document (e.g. `.env` or
+  a private key): refused locally, no upload in the staging MCP logs; a
+  `.csv` converts; a PNG renamed `notes.csv` is sniffed as an image and
+  converted through the OCR path, never read as text.
+- [ ] **C3 — Oversized output fallback.** A document whose conversion
+  exceeds the inline cap: exactly one retry, the full markdown saved under
+  `~/.local/share/opencode/lunaroute-docs` (private permissions), path
+  returned with the document's opening lines.
+- [ ] **C4 — convertTools toggle.** `{"convertTools": "off"}` or
+  `LUNAROUTE_CONVERT_TOOLS=off` + reload/restart: the tool is gone;
+  re-enable: back without a process restart.
+
 ---
 
 Result: _pending_ (all items PASS → release may proceed; any FAIL → fix,
