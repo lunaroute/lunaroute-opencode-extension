@@ -1,6 +1,7 @@
 import { tool, type ToolDefinition, type ToolResult } from "@opencode-ai/plugin";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AuthResolution } from "./mcp.js";
@@ -213,14 +214,22 @@ export interface ImageIo {
   mkdir(path: string, options: { recursive: boolean; mode?: number }): Promise<void>;
   writeFile(path: string, data: Uint8Array, options?: { mode?: number }): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
+  /** Atomic no-replace publish: create `to` as a hard link to `from` —
+   * fails (EEXIST) when `to` already exists, so a concurrent writer's file
+   * can never be clobbered (roborev follow-up on gv7t). Same-directory
+   * use; the source is removed by the caller afterwards. */
+  link(from: string, to: string): Promise<void>;
   /** Atomic rename (same-filesystem) for the temp-then-rename save. */
   rename(from: string, to: string): Promise<void>;
   /** Best-effort removal (temp cleanup). */
   rm(path: string): Promise<void>;
   /** Read at most maxBytes from the start of the file. The bound is
    * load-bearing: a path swapped for a huge file between checks must never
-   * be fully loaded (pi roborev job 1659). */
-  readFileBounded(path: string, maxBytes: number): Promise<Uint8Array>;
+   * be fully loaded (pi roborev job 1659). `noFollow` refuses a symlinked
+   * final component (ELOOP) — the convert tool's path-trust policy requires
+   * the bytes to come from the file at the stated path, not from wherever a
+   * symlink lands (roborev this repo). */
+  readFileBounded(path: string, maxBytes: number, options?: { noFollow?: boolean }): Promise<Uint8Array>;
 }
 
 /** Collect bytes via repeated positional reads until EOF or maxBytes.
@@ -253,12 +262,17 @@ export const defaultIo: ImageIo = {
   chmod: async (path, mode) => {
     await chmod(path, mode);
   },
+  link: async (from, to) => {
+    await link(from, to);
+  },
   rename,
   rm,
   // Descriptor-based bounded read: one open, positional reads capped at
-  // maxBytes — the file's true size never dictates memory use.
-  readFileBounded: async (path, maxBytes) => {
-    const handle = await open(path, "r");
+  // maxBytes — the file's true size never dictates memory use. noFollow:
+  // O_NOFOLLOW on the final component (0 where the platform lacks it).
+  readFileBounded: async (path, maxBytes, options) => {
+    const flags = options?.noFollow ? constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) : "r";
+    const handle = await open(path, flags);
     try {
       return await readUntilLimit(
         (buffer, offset, length, position) =>

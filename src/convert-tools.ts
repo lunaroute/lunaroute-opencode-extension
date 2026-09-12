@@ -96,7 +96,17 @@ const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 export function sniffDocumentFormat(bytes: Uint8Array): DocumentFormat | undefined {
   if (bytes.length === 0) return undefined; // nothing to convert
   if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
-    return { kind: "binary", format: "zip" };
+    // ZIP-family: a bare PK marker accepts ANY archive — backups, credential
+    // bundles, things the server cannot convert — so require a recognized
+    // member structure before the bytes may leave (roborev this repo).
+    // Member NAMES are stored uncompressed in ZIP headers, so a byte scan is
+    // reliable for this gate; the server remains the format authority.
+    const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const ooxml = buffer.includes("[Content_Types].xml") && /(word\/|ppt\/|xl\/)/.test(buffer.toString("latin1"));
+    const odf = buffer.includes("opendocument"); // the ODF/EPUB mimetype entry is stored uncompressed by spec
+    const epub = buffer.includes("epub+zip");
+    if (ooxml || odf || epub) return { kind: "binary", format: "zip" };
+    return undefined;
   }
   if (bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d) {
     return { kind: "binary", format: "pdf" }; // %PDF-
@@ -161,22 +171,44 @@ export async function saveDocument(
     if (hardenDir) await io.chmod(dir, 0o700).catch(() => {});
     if (signal?.aborted) return undefined;
     const target = join(dir, `${baseName}.md`);
-    const existing = await io.readFileBounded(target, bytes.byteLength + 1).catch(() => undefined);
-    const finalPath = existing && !buffersEqual(existing, bytes) ? join(dir, `${baseName}-${randomUUID().slice(0, 6)}.md`) : target;
-    finalTmp = `${finalPath}.${randomUUID()}.tmp`;
+    finalTmp = `${target}.${randomUUID()}.tmp`;
     await io.writeFile(finalTmp, bytes, { mode: 0o600 });
     if (signal?.aborted) {
       await io.rm(finalTmp).catch(() => {});
       return undefined;
     }
-    await io.rename(finalTmp, finalPath);
-    // The save completed before any cancellation that lands here: the
-    // document is established and reported honestly — NEVER deleted.
-    // Deleting could remove a concurrent identical writer's output
-    // (content equality does not prove ownership, pi roborev 1727), and
-    // unlike the image tools' unique img_ ids, document names are shared;
-    // the file is trivially reproducible by re-converting. The pre-rename
-    // checks above remain the abort boundary.
+    // Atomic no-replace publish: link fails with EEXIST when the target
+    // exists, so a concurrent conversion's file is never clobbered (the
+    // old pre-rename existence check was a TOCTOU — roborev this repo).
+    // On EEXIST: identical content → keep the shared path (idempotent);
+    // different content → unique suffix, retried once.
+    let finalPath = target;
+    try {
+      await io.link(finalTmp, finalPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code !== "EEXIST") {
+        await io.rm(finalTmp).catch(() => {});
+        return undefined;
+      }
+      const existing = await io.readFileBounded(target, bytes.byteLength + 1).catch(() => undefined);
+      if (existing !== undefined && buffersEqual(existing, bytes)) {
+        await io.rm(finalTmp).catch(() => {});
+        return target; // idempotent re-conversion
+      }
+      finalPath = join(dir, `${baseName}-${randomUUID().slice(0, 6)}.md`);
+      try {
+        await io.link(finalTmp, finalPath);
+      } catch {
+        await io.rm(finalTmp).catch(() => {});
+        return undefined;
+      }
+    }
+    // Published. The link left our temp file behind — clean it up (the
+    // TARGET is never deleted: a concurrent identical writer's output must
+    // not be removed on someone else's content equality, pi roborev 1727,
+    // and unlike the image tools' unique img_ ids, document names are
+    // shared; the file is trivially reproducible by re-converting).
+    await io.rm(finalTmp).catch(() => {});
     return finalPath;
   } catch {
     if (finalTmp !== undefined) {
@@ -244,7 +276,18 @@ export function buildConvertTool(deps: ConvertToolExecuteDeps): ToolDefinition {
       } else if (args.path) {
         // Bounded read: at most the ceiling + 1 byte ever enters memory,
         // whatever happens to the file between checks (e30g discipline).
-        const data = await io.readFileBounded(args.path, CONVERT_MAX_INPUT_BYTES + 1);
+        // noFollow: the path-trust policy requires the bytes to come from
+        // the file at the stated path — a report.csv symlink to a private
+        // key must fail here, not sail past the guard (roborev this repo).
+        let data: Uint8Array;
+        try {
+          data = await io.readFileBounded(args.path, CONVERT_MAX_INPUT_BYTES + 1, { noFollow: true });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException | null)?.code === "ELOOP") {
+            throw new Error(`${args.path} is a symbolic link — convert the real file instead (symlinks are refused for safety)`);
+          }
+          throw err;
+        }
         if (data.byteLength > CONVERT_MAX_INPUT_BYTES) {
           throw new Error(`${args.path} exceeds the ${(CONVERT_MAX_INPUT_BYTES / (1024 * 1024)) | 0} MiB LunaRoute conversion ceiling`);
         }
@@ -274,8 +317,13 @@ export function buildConvertTool(deps: ConvertToolExecuteDeps): ToolDefinition {
           const claimExt = ext(filename);
           const claimedCsv = claimExt === ".csv" && (pathExt === ".csv" || pathExt === "");
           // Hidden path components (dotfiles, .ssh/.aws/…) never leave the
-          // machine as text, whatever they claim.
-          if (!claimedCsv || pathBase.startsWith(".") || /(^|\/)\./.test(normalizedPath)) {
+          // machine as text, whatever they claim. The exactly-"." component
+          // is exempt so ordinary relative paths (./data.csv) work; ".."
+          // traversal and dotfiles still refuse.
+          const hiddenComponent = normalizedPath
+            .split("/")
+            .some((c) => c.startsWith(".") && c !== ".");
+          if (!claimedCsv || pathBase.startsWith(".") || hiddenComponent) {
             throw new Error(
               `${args.path} is plain text — only .csv files are converted as text (binary formats are detected by content)`,
             );

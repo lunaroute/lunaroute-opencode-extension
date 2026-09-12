@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ToolContext } from "@opencode-ai/plugin";
-import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SETTINGS } from "../src/settings.js";
@@ -99,6 +99,13 @@ const makeIo = (): ImageIo & {
     chmod: async (path, mode) => {
       chmods.push({ path, mode });
     },
+    link: async (from, to) => {
+      if (files.has(to)) {
+        throw Object.assign(new Error("file exists"), { code: "EEXIST" });
+      }
+      const data = files.get(from);
+      if (data) files.set(to, data);
+    },
     rename: async (from, to) => {
       renames.push([from, to]);
       const data = files.get(from);
@@ -133,7 +140,12 @@ const argsOf = (calls: RecordedCall[]) =>
   callBodies(calls, "tools/call").map((c) => (c.body.params as { arguments: Record<string, unknown> }).arguments);
 const outputOf = (r: ToolResult): string => (typeof r === "string" ? r : r.output);
 
-const ZIP = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]);
+const ZIP_HEAD = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2]);
+const withZipName = (name: string) => new Uint8Array([...ZIP_HEAD, ...new TextEncoder().encode(name)]);
+const DOCX = withZipName("[Content_Types].xml word/document.xml");
+const ODT = withZipName("mimetype application/vnd.oasis.opendocument.text");
+const EPUB = withZipName("mimetype application/epub+zip");
+const PLAIN_ZIP = withZipName("backups/2024.tar notes.txt"); // no recognized structure → rejected
 const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 1]);
 const RTF = new Uint8Array([0x7b, 0x5c, 0x72, 0x74, 0x66, 1]);
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
@@ -146,7 +158,10 @@ const NOT_UTF8 = new Uint8Array([0xff, 0xfe, 0x00, 0xff, 0x00]);
 
 describe("sniffDocumentFormat", () => {
   it("binary magics: zip/pdf/rtf/image families", () => {
-    expect(sniffDocumentFormat(ZIP)).toEqual({ kind: "binary", format: "zip" });
+    expect(sniffDocumentFormat(DOCX)).toEqual({ kind: "binary", format: "zip" });
+    expect(sniffDocumentFormat(ODT)).toEqual({ kind: "binary", format: "zip" });
+    expect(sniffDocumentFormat(EPUB)).toEqual({ kind: "binary", format: "zip" });
+    expect(sniffDocumentFormat(PLAIN_ZIP)).toBeUndefined(); // unrecognized archive → never uploads
     expect(sniffDocumentFormat(PDF)).toEqual({ kind: "binary", format: "pdf" });
     expect(sniffDocumentFormat(RTF)).toEqual({ kind: "binary", format: "rtf" });
     expect(sniffDocumentFormat(PNG)).toEqual({ kind: "binary", format: "image", mime: "image/png" });
@@ -186,7 +201,7 @@ describe("saveDocument", () => {
     const again = await saveDocument("/docs", "report", bytes, io);
     expect(first).toBe("/docs/report.md");
     expect(again).toBe("/docs/report.md");
-    expect(state.renames).toHaveLength(2);
+    expect(state.files.has("/docs/report.md")).toBe(true);
   });
   it("different content at the target → unique suffix", async () => {
     const io = makeIo();
@@ -194,18 +209,21 @@ describe("saveDocument", () => {
     const second = await saveDocument("/docs", "report", new TextEncoder().encode("# Other"), io);
     expect(second).toMatch(/^\/docs\/report-[0-9a-f]{6}\.md$/);
   });
-  it("failure removes only the temp file; success never deletes", async () => {
+  it("publish failure removes only the temp file; success cleans the tmp, never the target", async () => {
     const state = makeIo();
     const io = state;
-    state.rename = async () => {
+    state.link = async () => {
       throw new Error("disk full");
     };
     expect(await saveDocument("/docs", "r", bytes, io)).toBeUndefined();
     expect(state.rms).toHaveLength(1); // the tmp only
     const state2 = makeIo();
     const io2 = state2;
-    await saveDocument("/docs", "r", bytes, io2);
-    expect(state2.rms).toHaveLength(0); // success: nothing removed
+    const path = await saveDocument("/docs", "r", bytes, io2);
+    expect(path).toBe("/docs/r.md");
+    expect(state2.rms).toHaveLength(1); // tmp cleanup after the atomic publish
+    expect(state2.files.has("/docs/r.md")).toBe(true); // the target is never deleted
+    expect(state2.renames).toHaveLength(0); // publish is link-based, not rename-based
   });
   it("private by default: tmp written 0600, dir hardened only when asked", async () => {
     const state = makeIo();
@@ -296,10 +314,10 @@ describe("convert_document execute", () => {
       callResult: () => ({ content: [{ type: "text", text: "# Converted\n\ntext" }] }),
     });
     void io;
-    io.files.set("/tmp/report.docx", ZIP);
+    io.files.set("/tmp/report.docx", DOCX);
     const result = await map.convert_document.execute({ path: "/tmp/report.docx" }, ctx());
     const sent = argsOf(server.calls)[0];
-    expect(sent.data).toBe(Buffer.from(ZIP).toString("base64"));
+    expect(sent.data).toBe(Buffer.from(DOCX).toString("base64"));
     expect(sent.filename).toBe("report.docx");
     expect(sent.embed).toBe(true);
     expect(sent.ocr).toBeUndefined();
@@ -356,6 +374,16 @@ describe("convert_document execute", () => {
     expect(callBodies(server.calls, "tools/call")).toHaveLength(0);
   });
 
+  it("text policy: ordinary relative paths (./data.csv) are not falsely hidden", async () => {
+    const { map, server, io } = await build({
+      tools: [{ name: "convert_document" }],
+      callResult: () => ({ content: [{ type: "text", text: "a,b" }] }),
+    });
+    io.files.set("./data.csv", CSV);
+    await map.convert_document.execute({ path: "./data.csv" }, ctx());
+    expect(argsOf(server.calls)[0].filename).toBe("data.csv");
+  });
+
   it("binary immunity: a png named notes.csv is sniffed, not trusted as text", async () => {
     const { map, server, io } = await build({
       tools: [{ name: "convert_document" }],
@@ -397,7 +425,7 @@ describe("convert_document execute", () => {
     const out = outputOf(result);
     expect(out).toContain("full document saved to: /tmp/lr-test-docs/document.md");
     expect(out).toContain("# Full document");
-    expect(io.renames).toHaveLength(1);
+    expect(io.files.has("/tmp/lr-test-docs/document.md")).toBe(true);
   });
 
   it("output_too_large (raw isError shape via a non-throwing callServer) routes to the same fallback", async () => {
@@ -478,5 +506,28 @@ describe("convert_document execute", () => {
     const mapB = await buildConvertToolMap(makeDeps(override.fetchImpl, { io: ioB, descriptors: [{ name: "convert_document" }] }));
     await mapB.convert_document.execute({ url: "https://example.com/d.docx" }, ctx());
     expect(ioB.chmods).toEqual([]); // LUNAROUTE_DOCS_DIR override is user-managed
+  });
+});
+
+describe("symlink refusal (real fs — the path-trust boundary)", () => {
+  it("a report.csv symlink to a private key is refused before any upload", async () => {
+    const base = mkdtempSync(join(tmpdir(), "lr-symlink-"));
+    try {
+      const secret = join(base, "id_rsa");
+      writeFileSync(secret, "-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n-----END-----\n");
+      const link = join(base, "report.csv");
+      symlinkSync(secret, link);
+      const server = fakeMcp({
+        tools: [{ name: "convert_document" }],
+        callResult: () => ({ content: [{ type: "text", text: "should never happen" }] }),
+      });
+      const map = await buildConvertToolMap(
+        makeDeps(server.fetchImpl, { io: defaultIo, descriptors: [{ name: "convert_document" }] }),
+      );
+      await expect(map.convert_document.execute({ path: link }, ctx())).rejects.toThrow(/symbolic link/);
+      expect(callBodies(server.calls, "tools/call")).toHaveLength(0);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
