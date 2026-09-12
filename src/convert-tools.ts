@@ -128,13 +128,24 @@ function recognizedZipContainer(bytes: Uint8Array): boolean {
     names.push(name);
     if (name === "mimetype" && method === 0) {
       // The mimetype entry must be STORED; read its content through the
-      // local header (name/extra lengths are per-entry there).
+      // local header (name/extra lengths are per-entry there). ODF/EPUB
+      // spec: mimetype is the FIRST local entry, and its local name and
+      // stored sizes must agree with the central record — a central record
+      // pointing at an unrelated local entry does not make this a document
+      // container (roborev follow-up round 2).
       const contentLen = u32(offset + 24); // uncompressed size == stored size
+      if (localOffset !== 0) return false; // must be the first local entry
       if (u32(localOffset) !== 0x04034b50) return false;
+      if (u16(localOffset + 8) !== 0) return false; // local method must be stored too
       const lNameLen = u16(localOffset + 26);
       const lExtraLen = u16(localOffset + 28);
+      if (localOffset + 30 + lNameLen > buf.length) return false;
+      if (buf.toString("utf8", localOffset + 30, localOffset + 30 + lNameLen) !== "mimetype") return false;
+      const lCsize = u32(localOffset + 18);
+      const lUsize = u32(localOffset + 22);
+      if (lCsize !== contentLen || lUsize !== contentLen) return false;
       const contentStart = localOffset + 30 + lNameLen + lExtraLen;
-      if (contentLen <= 0 || contentLen < 0 || contentStart < 0 || contentStart + contentLen > buf.length) return false;
+      if (contentLen <= 0 || contentStart < 0 || contentStart + contentLen > buf.length) return false;
       mimetypeContent = buf.toString("latin1", contentStart, contentStart + contentLen);
     }
     offset += 46 + nameLen + extraLen + commentLen;

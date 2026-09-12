@@ -222,6 +222,23 @@ describe("sniffDocumentFormat", () => {
     expect(sniffDocumentFormat(PLAIN_ZIP)).toBeUndefined();
     expect(sniffDocumentFormat(WRONG_MIMETYPE)).toBeUndefined(); // mimetype entry must carry the exact magic
     expect(sniffDocumentFormat(DOCX.subarray(0, DOCX.length - 30))).toBeUndefined(); // malformed → fail closed
+    // mimetype must be the FIRST local entry with a matching local name and sizes
+    const WRONG_MIMETYPE_SECOND = buildZip([
+      { name: "extra.txt", content: "x" },
+      { name: "mimetype", content: "application/epub+zip" },
+    ]);
+    expect(sniffDocumentFormat(WRONG_MIMETYPE_SECOND)).toBeUndefined();
+    const LOCAL_NAME_MISMATCH = (() => {
+      const z = new Uint8Array(EPUB);
+      // corrupt the LOCAL header's name (central record still says mimetype)
+      const raw = "mimetype";
+      const at = z.length - 22; // walk back: EOCD at the end; the first local entry starts at 0
+      z.set(new TextEncoder().encode("M"), 30); // local name starts at offset 30
+      void at;
+      void raw;
+      return z;
+    })();
+    expect(sniffDocumentFormat(LOCAL_NAME_MISMATCH)).toBeUndefined();
     expect(sniffDocumentFormat(PDF)).toEqual({ kind: "binary", format: "pdf" });
     expect(sniffDocumentFormat(RTF)).toEqual({ kind: "binary", format: "rtf" });
     expect(sniffDocumentFormat(PNG)).toEqual({ kind: "binary", format: "image", mime: "image/png" });
