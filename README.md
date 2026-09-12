@@ -89,12 +89,14 @@ persisted anywhere outside OpenCode's own auth store.
   restart. Restarting also works, but is not required.
 
 > **Duplicate surface, by design (for now).** Once first-class tools like
-> `web_search` are registered, the MCP server still exposes the same
-> capability under a prefixed name (`lunaroute_web_search`). The MCP
-> registration stays because it also serves tools the first-class set does
-> not cover (e.g. `generate_image`), and OpenCode's MCP config cannot filter
-> individual tools of a registered server. See
-> [Web search](#web-search-web_search) for the full rule and the escape
+> `web_search`, `generate_image`, `edit_image`, and `upload_image` are
+> registered, the MCP server still exposes the same capabilities under
+> prefixed names (`lunaroute_web_search`, `lunaroute_generate_image`, …).
+> The MCP registration stays because it also serves tools the first-class
+> set does not cover (e.g. `convert_document`), and OpenCode's MCP config
+> cannot filter individual tools of a registered server. See
+> [Web search](#web-search-web_search) and
+> [Image tools](#image-tools) for the full rule and the escape
 > hatches.
 
 ### MCP entry management
@@ -195,6 +197,36 @@ Notes and limits:
   diverge the `mcp.lunaroute` entry (see
   [MCP entry management](#mcp-entry-management)).
 
+## Image tools
+
+When you're logged in and the hosted LunaRoute MCP server offers them, the
+extension registers first-class **`generate_image`**, **`edit_image`**, and
+**`upload_image`** tools (same gate as the web tools: settings + valid key +
+the server's `tools/list`, checked on every session start).
+
+- **Images you can see**: generated and edited images are saved locally
+  (temp-then-rename, so a cancelled call never leaves a partial file) and
+  returned as a `file://` attachment — vision models see the actual image,
+  not just a URL. The server's own result lines are never rewritten; the
+  local path is appended (`saved to: …`, or `not saved locally — fetch the
+  url before it expires`).
+- **Per-org models**: the `model` parameter's allowed values come from the
+  server's `tools/list` (per-org entitlement, with per-model limit hints in
+  the description) — re-probed on every session start, so catalog changes
+  apply on the next instance.
+- **upload_image is local-safe by construction**: the file is sniffed by
+  magic bytes (png/jpeg/webp) *before* any bytes leave the machine, read
+  through a bounded descriptor read (at most the 11 MiB ceiling + 1 byte
+  ever enters memory, however the file changes mid-read), and ids are
+  validated (`img_…` only) before anything touches a filesystem path.
+- **Save location**: `$XDG_DATA_HOME/opencode/lunaroute-images` (default
+  `~/.local/share/opencode/lunaroute-images`), override with
+  `LUNAROUTE_IMAGE_DIR`.
+- **Key rotation**: the current key is re-read on every call — no restart
+  needed.
+- **Disable**: `LUNAROUTE_IMAGE_TOOLS=off` / `{"imageTools": "off"}` —
+  same semantics as the web tools.
+
 ## Configuration
 
 The gateway, API, and front URLs default to production and are overridable
@@ -240,6 +272,9 @@ key validation) — one effective URL for all of them.
 - **Settings file problems**: a malformed `lunaroute.json` logs one warn and
   behaves as if the file were absent (defaults) — fix the JSON and reload;
   nothing else is affected.
+- **Generated image not visible to the model**: it is saved locally and
+  attached as a file — if the model still can't see it, the model in use may
+  lack vision; check the model's capabilities in `/models`.
 - **Windows**: not supported in v1 — the auth store path is verified on
   Linux and macOS only.
 

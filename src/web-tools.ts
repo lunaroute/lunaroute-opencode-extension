@@ -71,6 +71,9 @@ export interface McpToolCallResult {
 
 export interface LunarouteMcpClient {
   listTools(signal?: AbortSignal): Promise<string[]>;
+  /** Full tools/list descriptors (name + inputSchema) — the image tools bake
+   * the server's per-org model enum into their schema from these (kata 5715). */
+  listToolDescriptors(signal?: AbortSignal): Promise<{ name: string; inputSchema?: unknown }[]>;
   callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolCallResult>;
 }
 
@@ -196,6 +199,15 @@ export function createLunarouteMcpClient(opts: {
       return (result?.tools ?? [])
         .map((t) => t.name)
         .filter((n): n is string => typeof n === "string");
+    },
+    async listToolDescriptors(signal) {
+      await ensureInitialized(signal);
+      const result = (await rpc("tools/list", undefined, signal)) as
+        | { tools?: { name?: string; inputSchema?: unknown }[] }
+        | undefined;
+      return (result?.tools ?? []).filter(
+        (t): t is { name: string; inputSchema?: unknown } => typeof t.name === "string",
+      );
     },
     async callTool(name, args, signal) {
       await ensureInitialized(signal);
@@ -363,6 +375,27 @@ export function buildWebFetchTool(deps: Omit<WebToolExecuteDeps, "defaultProvide
 
 export const WEB_TOOLS_PROBE_TIMEOUT_MS = 5000;
 
+export interface ServerProbeOpts {
+  url: string;
+  key: string;
+  sessionId: string;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+}
+
+/** One tools/list probe with the resolved key — shared by the web-tools and
+ * image-tools gates so an instance creation costs one round trip, not two
+ * (both gates consume the same server view). Throws on failure; callers
+ * decide warn/skip semantics. */
+export async function listServerToolDescriptors(opts: ServerProbeOpts): Promise<{ name: string; inputSchema?: unknown }[]> {
+  const client = createLunarouteMcpClient({
+    url: opts.url,
+    headers: { "LUNAROUTE-API-KEY": opts.key, ...buildAttributionHeaders(opts.sessionId) },
+    fetchImpl: opts.fetchImpl ?? (fetch as FetchLike),
+  });
+  return client.listToolDescriptors(AbortSignal.timeout(opts.timeoutMs ?? WEB_TOOLS_PROBE_TIMEOUT_MS));
+}
+
 export interface WebToolMapDeps {
   env: NodeJS.ProcessEnv;
   mcpUrl: string;
@@ -374,6 +407,10 @@ export interface WebToolMapDeps {
   resolveKey: () => Promise<AuthResolution>;
   /** Fresh settings read (file = source of truth), per gate and per execute. */
   readSettingsNow: () => LunarouteSettings;
+  /** Pre-fetched tools/list descriptors (the shared probe in index.ts).
+   * When present the gate skips its own probe; direct callers (tests) omit
+   * it and the gate probes itself. */
+  descriptors?: { name: string; inputSchema?: unknown }[];
 }
 
 function authErrorMessage(resolution: AuthResolution): string {
@@ -411,15 +448,20 @@ export async function buildWebToolMap(deps: WebToolMapDeps): Promise<Record<stri
 
   // Probe: consult tools/list with the resolved key (short timeout — this
   // runs on the plugin-invocation path). Failures are not cached; the next
-  // invocation retries.
+  // invocation retries. Skipped entirely when descriptors were pre-fetched
+  // by the shared probe.
   let serverTools: string[];
-  try {
-    serverTools = await createLunarouteMcpClient({ url: deps.mcpUrl, headers: headers(resolution.key), fetchImpl }).listTools(
-      AbortSignal.timeout(WEB_TOOLS_PROBE_TIMEOUT_MS),
-    );
-  } catch (err) {
-    deps.log?.("warn", `LunaRoute: web tools not registered (tools/list failed: ${err instanceof Error ? err.message : String(err)})`);
-    return {};
+  if (deps.descriptors) {
+    serverTools = deps.descriptors.map((d) => d.name);
+  } else {
+    try {
+      serverTools = await createLunarouteMcpClient({ url: deps.mcpUrl, headers: headers(resolution.key), fetchImpl }).listTools(
+        AbortSignal.timeout(WEB_TOOLS_PROBE_TIMEOUT_MS),
+      );
+    } catch (err) {
+      deps.log?.("warn", `LunaRoute: web tools not registered (tools/list failed: ${err instanceof Error ? err.message : String(err)})`);
+      return {};
+    }
   }
 
   const searchTool = pickServerTool(serverTools, WEB_SEARCH_TOOL_PATTERNS, deps.env[LUNAROUTE_ENV_MCP_WEB_SEARCH_TOOL]);

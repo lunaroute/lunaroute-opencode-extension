@@ -159,6 +159,28 @@ Settings file: `$XDG_DATA_HOME/opencode/lunaroute.json` (default
   on 1.18.25); confirm the npm-pack install path still works before
   release, and adjust the README install instructions if it regressed.
 
+## Image tools (kata 5715)
+
+- [ ] **I1 — All three registered.** Logged in + server offers them +
+  restart: `generate_image`, `edit_image`, `upload_image` are callable; the
+  MCP duplicates (`lunaroute_generate_image`, …) also exist — expected.
+- [ ] **I2 — Vision loop.** Ask the agent to generate an image: the result
+  carries a `file://` attachment and the saved path under
+  `~/.local/share/opencode/lunaroute-images`; a vision model then describes
+  the image without re-reading it.
+- [ ] **I3 — Model enum from the server.** The `model` parameter only
+  accepts the per-org values (wrong id → validation error naming the
+  allowed models).
+- [ ] **I4 — upload_image safety.** Point `path` at a non-image (e.g. a
+  text file with secrets): the tool refuses locally, nothing is uploaded
+  (staging MCP logs show no request); a >11 MiB image is refused with the
+  ceiling message.
+- [ ] **I5 — imageTools toggle.** `{"imageTools": "off"}` or
+  `LUNAROUTE_IMAGE_TOOLS=off` + reload/restart: all three gone; re-enable:
+  back without a process restart (PATCH-triggered reload or restart).
+- [ ] **I6 — Edit flow.** generate → pass the id to edit_image → new id +
+  saved file; upload a local png → id → edit it.
+
 ---
 
 Result: _pending_ (all items PASS → release may proceed; any FAIL → fix,

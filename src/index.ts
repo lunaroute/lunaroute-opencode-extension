@@ -11,8 +11,9 @@ import {
 import { createLunarouteAuth } from "./login.js";
 import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub } from "./models.js";
 import { createMcpReconciler, resolveAuthState, resolveAuthStorePath, type AuthStoreFS } from "./mcp.js";
-import { mcpEnabled, readSettings } from "./settings.js";
-import { buildWebToolMap } from "./web-tools.js";
+import { mcpEnabled, imageToolsEnabled, readSettings, webToolsEnabled } from "./settings.js";
+import { buildImageToolMap } from "./image-tools.js";
+import { buildWebToolMap, listServerToolDescriptors } from "./web-tools.js";
 
 export type PluginLog = (level: "info" | "warn", message: string) => void;
 
@@ -174,22 +175,50 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
       }
     };
 
-    // First-class web tools (kata gygp): gated per invocation on settings,
-    // a valid key, and the hosted server's tools/list. Never registered when
-    // logged out; probe failures skip with a warn (the next invocation
-    // retries — nothing is memoized).
+    // First-class tools (kata gygp web + kata 5715 image): gated per
+    // invocation on settings, a valid key, and the hosted server's
+    // tools/list — probed ONCE per instance and shared by both gates.
+    // Never registered when logged out; probe failures skip with a warn
+    // (the next invocation retries — nothing is memoized).
     let webToolMap: Record<string, ToolDefinition> = {};
+    let imageToolMap: Record<string, ToolDefinition> = {};
     try {
-      webToolMap = await buildWebToolMap({
-        env,
-        mcpUrl,
-        sessionId,
-        log,
-        resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
-        readSettingsNow: () => readSettings(env, home, undefined, onInvalidSettings),
-      });
+      const settings = readSettings(env, home, undefined, onInvalidSettings);
+      const wantWeb = webToolsEnabled(env, settings);
+      const wantImage = imageToolsEnabled(env, settings);
+      const resolution = await resolveAuthState(webToolsStoreKey, deps.fs);
+      if (resolution.state === "valid" && (wantWeb || wantImage)) {
+        const descriptors = await listServerToolDescriptors({ url: mcpUrl, key: resolution.key, sessionId });
+        const [web, image] = await Promise.all([
+          wantWeb
+            ? buildWebToolMap({
+                env,
+                mcpUrl,
+                sessionId,
+                log,
+                resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
+                readSettingsNow: () => readSettings(env, home, undefined, onInvalidSettings),
+                descriptors,
+              })
+            : Promise.resolve({}),
+          wantImage
+            ? buildImageToolMap({
+                env,
+                home,
+                mcpUrl,
+                sessionId,
+                log,
+                resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
+                readSettingsNow: () => readSettings(env, home, undefined, onInvalidSettings),
+                descriptors,
+              })
+            : Promise.resolve({}),
+        ]);
+        webToolMap = web;
+        imageToolMap = image;
+      }
     } catch (err) {
-      log("warn", `LunaRoute: web tools registration failed: ${err instanceof Error ? err.message : String(err)}`);
+      log("warn", `LunaRoute: first-class tools not registered (tools/list failed: ${err instanceof Error ? err.message : String(err)})`);
     }
 
     return {
@@ -270,7 +299,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
           Object.assign(output.headers, buildAttributionHeaders(sessionId));
         }
       },
-      tool: webToolMap,
+      tool: { ...webToolMap, ...imageToolMap },
       dispose: async () => {},
     };
   };
