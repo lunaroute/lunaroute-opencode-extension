@@ -172,21 +172,7 @@ describe("config hook", () => {
     }
   });
 
-  it("valid + catalog fetch failure: no models and no placeholder (transient outage keeps today's fail-safe)", async () => {
-    const fs = fsWith({ type: "api", key: "lr_good" });
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("gateway down")));
-    try {
-      const { plugin } = makePlugin();
-      const hooks = await plugin({});
-      const cfg: Record<string, unknown> = {};
-      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
-      expect(providerOf(cfg).models).toBeUndefined();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("catalog fetch failure: stub + MCP land, no models, one warn", async () => {
+  it("valid + catalog fetch failure: unavailable placeholder keeps LunaRoute visible (zero-model providers are dropped by OpenCode)", async () => {
     const fs = fsWith({ type: "api", key: "lr_good" });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("gateway down")));
     try {
@@ -194,7 +180,43 @@ describe("config hook", () => {
       const hooks = await plugin({});
       const cfg: Record<string, unknown> = {};
       await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
-      expect(providerOf(cfg).models).toBeUndefined();
+      const models = providerOf(cfg).models as Record<string, Record<string, unknown>>;
+      expect(Object.keys(models)).toEqual(["login"]);
+      expect(models.login).toMatchObject({
+        name: "Couldn't load models — check connection and restart",
+        status: "active",
+      });
+      expect(logs.some((l) => l.level === "warn" && /catalog fetch failed/.test(l.message))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("valid + empty catalog: placeholder instead of a zero-model provider", async () => {
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) }));
+    try {
+      const { plugin } = makePlugin();
+      const hooks = await plugin({});
+      const cfg: Record<string, unknown> = {};
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      const models = providerOf(cfg).models as Record<string, Record<string, unknown>>;
+      expect(Object.keys(models)).toEqual(["login"]);
+      expect(models.login.name).toBe("Couldn't load models — check connection and restart");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("catalog fetch failure: stub + MCP + unavailable placeholder land, one warn", async () => {
+    const fs = fsWith({ type: "api", key: "lr_good" });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("gateway down")));
+    try {
+      const { plugin, logs } = makePlugin();
+      const hooks = await plugin({});
+      const cfg: Record<string, unknown> = {};
+      await hooks.config(cfg, { storeKey: AUTH_PATH, fs });
+      expect(Object.keys(providerOf(cfg).models as Record<string, unknown>)).toEqual(["login"]);
       expect(mcpOf(cfg).headers["LUNAROUTE-API-KEY"]).toBe("lr_good");
       expect(logs.some((l) => l.level === "warn" && /catalog/.test(l.message))).toBe(true);
     } finally {

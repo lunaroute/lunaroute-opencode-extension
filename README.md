@@ -40,7 +40,10 @@ you too.
 
 ## Quick start
 
-Add the plugin to your `opencode.json`:
+Add the plugin to your OpenCode config — the **global** `~/.config/opencode/opencode.json`
+or a **project** `opencode.json` (or `.opencode/opencode.json`) in the project root.
+OpenCode reads all of them; the project one wins on conflicts. (Do not use the
+`config.json` that OpenCode writes per instance — it is not a plugin source.)
 
 ```json
 {
@@ -48,6 +51,9 @@ Add the plugin to your `opencode.json`:
   "plugin": ["@lunaroute/opencode-extension"]
 }
 ```
+
+Previously installed an older release? Clear OpenCode's plugin cache first —
+see [Troubleshooting](#troubleshooting).
 
 Then in OpenCode:
 
@@ -326,13 +332,41 @@ key validation) — one effective URL for all of them.
 
 ## Troubleshooting
 
-- **`/connect` doesn't list LunaRoute**: with the plugin installed it
-  always should (a placeholder model keeps the provider listed before
-  first login). If you're re-authenticating after a **revoked key**
-  (shape-valid credential, gateway 401), `/connect` may not list
-  LunaRoute — use the CLI instead:
-  `opencode providers login --provider lunaroute` opens the same
-  login-method picker.
+- **`/connect` doesn't list LunaRoute**: run `opencode models | grep -i lunaroute`
+  first — the LunaRoute provider (placeholder model **Log in to load models**
+  before first login) must appear there too.
+  - **Missing from `opencode models` too** → the plugin isn't loading (or is
+    stale). OpenCode only reports load failures in the server log
+    (`~/.local/share/opencode/log/opencode.log` — look for
+    `failed to load plugin`; LunaRoute hook activity lands there as
+    `LunaRoute:` lines). In order of likelihood:
+    - **Stale plugin cache** (if you installed an older release before):
+      OpenCode pins the plugin at
+      `~/.cache/opencode/packages/@lunaroute/opencode-extension@latest`
+      (macOS: `~/Library/Caches/opencode/packages/@lunaroute/…`) and never
+      re-checks npm — a cached pre-0.1.2 copy keeps running forever, and
+      releases before 0.1.2 don't keep LunaRoute listed in `/connect`.
+      Clear it and restart OpenCode:
+      `rm -rf ~/.cache/opencode/packages/@lunaroute`.
+    - **Wrong config file or entry form**: the `plugin` entry must be in a
+      config file OpenCode reads (global `~/.config/opencode/opencode.json`
+      or a project `opencode.json`) and spelled as the npm name
+      `"@lunaroute/opencode-extension"` — a tarball/`file:` path entry does
+      not load on OpenCode ≥ 1.18.30.
+  - **Listed in `opencode models` but not `/connect`** → check
+    `enabled_providers` / `disabled_providers` in your OpenCode config:
+    OpenCode hides providers not in `enabled_providers` and those in
+    `disabled_providers` — remove `lunaroute` from the latter or add it to the
+    former.
+  - **Re-authenticating after a revoked key** (shape-valid credential,
+    gateway 401): `/connect` may not list LunaRoute — use the CLI instead:
+    `opencode providers login --provider lunaroute` opens the same
+    login-method picker.
+- **Placeholder says "Couldn't load models — check connection and restart"**:
+  you're logged in, but the model catalog could not be fetched (network, or a
+  custom `baseURL`/`LUNAROUTE_ROUTING_URL` pointing somewhere that doesn't
+  answer `/models`). The provider stays listed so you can retry; fix the
+  connection or URL and restart OpenCode.
 - **No models appear after login**: the gateway may be unreachable, or the
   key may be stale. Re-run `/connect`.
 - **Key rotation**: re-run `/connect` — the new key replaces the old one, and
