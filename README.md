@@ -70,8 +70,13 @@ one. The pick is recorded in the instance log so you can see what happened.
 
 On a headless machine (or when your browser is on another computer), choose
 **Log in from a remote browser** instead: open the URL it shows in any
-browser, approve there, and paste the redirect URL it lands on (it will
-fail to load — that's expected) back into OpenCode.
+browser and approve there, then paste back what the approval page gives you —
+its curl command, the callback URL, its `?code=...&state=...` part, or a
+bare code all work. The callback URL is a `127.0.0.1` address; opening it on
+the remote machine fails to load — that's expected. Codes are short-lived:
+paste promptly. A failed paste ends the flow (OpenCode cannot re-prompt) —
+re-run `/connect` for a fresh code; the instance log carries the exact
+reason.
 
 Before your first login, `/models` shows a single LunaRoute entry —
 **Log in to load models**. That placeholder is intentional: it keeps

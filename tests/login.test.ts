@@ -217,6 +217,63 @@ describe("remote-browser method (pi #6 parity)", () => {
     expect(exchange).not.toHaveBeenCalled();
   });
 
+  it("accepts the approval page's curl command (single-quoted URL) — the page's only copy artifact", async () => {
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth } = makeAuth({ deps: { exchange: exchange as never } });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("curl 'http://127.0.0.1:45117/callback?code=raw-code&state=st-1'")).toEqual({
+      type: "success",
+      key: "lr_new",
+    });
+    expect(exchange).toHaveBeenCalledWith(
+      "http://api",
+      expect.objectContaining({ code: "raw-code", verifier: "v".repeat(64) }),
+    );
+  });
+
+  it("accepts curl double-quoted and unquoted URL forms", async () => {
+    const { auth } = makeAuth({ deps: { exchange: async () => goodExchange } });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback('curl "http://127.0.0.1:45117/callback?code=raw-code&state=st-1"')).toEqual({
+      type: "success",
+      key: "lr_new",
+    });
+    expect(await started.callback("curl http://127.0.0.1:45117/callback?code=raw-code&state=st-1")).toEqual({
+      type: "success",
+      key: "lr_new",
+    });
+  });
+
+  it("accepts a bare authorization code (no state) — forward-compatible with the approval page's copyable code", async () => {
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth } = makeAuth({ deps: { exchange: exchange as never } });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("raw-code")).toEqual({ type: "success", key: "lr_new" });
+    expect(exchange).toHaveBeenCalledWith(
+      "http://api",
+      expect.objectContaining({ code: "raw-code", verifier: "v".repeat(64) }),
+    );
+    // code=X without a state is the same contract: no state to enforce.
+    expect(await started.callback("code=raw-code")).toEqual({ type: "success", key: "lr_new" });
+  });
+
+  it("reason-specific failure logs: no-code vs state mismatch", async () => {
+    const logs: { level: string; message: string }[] = [];
+    const exchange = vi.fn(async () => goodExchange);
+    const { auth } = makeAuth({
+      log: (level, message) => logs.push({ level, message }),
+      deps: { exchange: exchange as never },
+    });
+    const started = await remoteOf(auth).authorize();
+    expect(await started.callback("not a url at all")).toEqual({ type: "failed" });
+    expect(logs.some((l) => l.message === "LunaRoute remote-browser login failed: no code found in paste")).toBe(true);
+    expect(await started.callback("http://127.0.0.1:45117/callback?code=raw-code&state=WRONG")).toEqual({
+      type: "failed",
+    });
+    expect(logs.some((l) => l.message === "LunaRoute remote-browser login failed: state mismatch")).toBe(true);
+    expect(exchange).not.toHaveBeenCalled();
+  });
+
   it("browser-method timeout logs the info hint pointing at the remote-browser method", async () => {
     vi.useFakeTimers();
     try {
