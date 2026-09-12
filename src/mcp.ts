@@ -98,6 +98,35 @@ function apiKeyHeaderValue(entry: Record<string, unknown>): string | undefined {
  * guaranteed only for those; older generations fall to the unknown-credential
  * path (retained + info log) — fail-safe, bounded memory by design.
  */
+/** Normalized URL identity for the defer rule (kata h4j3): scheme + host
+ * (WHATWG normalization lowercases it) + pathname without trailing slashes.
+ * http vs https differ — an insecure same-host clone does not earn the
+ * defer; query/fragment are ignored as endpoint noise. */
+export function normalizedUrlIdentity(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const url = (value as { url?: unknown }).url;
+  if (typeof url !== "string" || url === "") return undefined;
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The first entry (other than the exact-name one, which keeps its own
+ * shape-based flow) pointing at the hosted MCP URL — the defer trigger
+ * (kata h4j3, pi 1z1s parity). */
+function foreignSameUrlEntry(mcp: Record<string, unknown>, mcpUrl: string): { key: string } | undefined {
+  const target = normalizedUrlIdentity({ url: mcpUrl });
+  if (!target) return undefined;
+  for (const [key, value] of Object.entries(mcp)) {
+    if (key === LUNAROUTE_PROVIDER) continue;
+    if (normalizedUrlIdentity(value) === target) return { key };
+  }
+  return undefined;
+}
+
 export function createMcpReconciler(mcpUrl: string, log: ReconcilerLog, sessionId: string) {
   const fingerprints = new Map<string, Set<string>>(); // storeKey → ordered fingerprints (most recent last)
   const remember = (storeKey: string, key: string): void => {
@@ -110,6 +139,17 @@ export function createMcpReconciler(mcpUrl: string, log: ReconcilerLog, sessionI
   };
   const knows = (storeKey: string, key: string): boolean =>
     (fingerprints.get(storeKey) ?? new Set<string>()).has(credentialFingerprint(key));
+
+  // Defer notice: once per process (same lifetime as the reconciler state).
+  let deferNoticeShown = false;
+  const showDeferNotice = (key: string): void => {
+    if (deferNoticeShown) return;
+    deferNoticeShown = true;
+    log(
+      "info",
+      `LunaRoute: your mcp.${key} server points at the hosted LunaRoute MCP URL — deferring to it (its key is static; rotation means editing it or removing it and letting the plugin re-register)`,
+    );
+  };
 
   return {
     reconcile(cfg: Record<string, unknown>, resolution: AuthResolution, storeKey: string): void {
@@ -125,6 +165,30 @@ export function createMcpReconciler(mcpUrl: string, log: ReconcilerLog, sessionI
       }
 
       if (resolution.state === "valid") {
+        // Defer rule (kata h4j3, pi 1z1s parity): ANY other entry pointing at
+        // the hosted MCP URL wins. A differently-named server coexisting with
+        // ours would duplicate every hosted tool with divergent credentials
+        // (the user's static key vs our rotated one) and without our
+        // attribution headers. The exact-name entry keeps its own flow below.
+        const foreign = foreignSameUrlEntry(mcp, mcpUrl);
+        if (foreign !== undefined) {
+          if (existing !== undefined && managed) {
+            const placedKey = apiKeyHeaderValue(existing as Record<string, unknown>);
+            if (placedKey !== undefined && knows(storeKey, placedKey)) {
+              // Ours, placed by us earlier in this process: remove the
+              // duplicate surface. The user's entry is never touched.
+              delete mcp[LUNAROUTE_PROVIDER];
+              cfg.mcp = mcp;
+              log("info", `LunaRoute: removed our duplicate mcp.lunaroute entry; your mcp.${foreign.key} server takes precedence`);
+            } else {
+              log("info", "LunaRoute: mcp.lunaroute matches the plugin shape but carries an unknown credential; left untouched");
+            }
+          } else if (existing !== undefined) {
+            log("info", "LunaRoute: user-defined mcp.lunaroute in effect; rotate by editing it or removing it");
+          }
+          showDeferNotice(foreign.key);
+          return;
+        }
         if (existing !== undefined && !managed) {
           log("info", "LunaRoute: user-defined mcp.lunaroute in effect; rotate by editing it or removing it");
           return;

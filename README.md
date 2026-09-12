@@ -115,6 +115,22 @@ the LunaRoute MCP URL + the expected headers). Two consequences:
 A `mcp.lunaroute` entry that doesn't match the plugin's shape is always left
 untouched.
 
+### Any-name servers at the hosted URL win
+
+The defer rule also covers differently-named entries: if **any** MCP server
+in your config points at the hosted LunaRoute MCP URL (regardless of its
+name, compared modulo case and trailing slashes), the plugin does not
+register its own `mcp.lunaroute` — your server wins, and the plugin logs a
+one-time notice. Without this, the model would see two copies of every
+hosted tool with divergent credentials (your static key vs the plugin's
+rotated one), and only the plugin's would carry the attribution headers.
+
+Note the trade-off: your entry's key is **static** — after a rotation,
+edit it (or remove it and let the plugin re-register with the fresh key).
+If the plugin had registered earlier in the session, it removes its own
+duplicate when your entry appears (only ever touching entries it placed
+itself).
+
 ## Settings
 
 User preferences live in `$XDG_DATA_HOME/opencode/lunaroute.json` (default
