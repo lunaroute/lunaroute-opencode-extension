@@ -168,6 +168,16 @@ values, and selecting one changes it — write-first, then the live-apply
 reload (a failed write never triggers the reload). It runs in the TUI
 process, outside the prompt loop, so it never spends a model turn.
 
+> **Loading status — unverified.** In the 7pd6 spike the external TUI module
+> was never imported on OpenCode 1.18.30 despite a correct manifest and
+> `tui.json` (the server half of the same package loaded, and opencode's own
+> TUI-plugin commands rendered). The spike could not distinguish a broken
+> loader from the unpublished/local-spec install used in the sandbox; a real
+> published install may work. Until smoke item **T1** confirms it, treat the
+> `lunaroute.json` file + env hatches below as the supported interface and the
+> command as best-effort. See
+> [docs/tui-plugin-loading-spike.md](./docs/tui-plugin-loading-spike.md).
+
 TUI plugins are declared in `tui.json`, **not** `opencode.json`:
 
 ```jsonc
