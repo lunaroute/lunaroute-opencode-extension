@@ -88,16 +88,16 @@ persisted anywhere outside OpenCode's own auth store.
   update); a new key is picked up on the next instance without a process
   restart. Restarting also works, but is not required.
 
-> **Duplicate surface, by design (for now).** Once first-class tools like
-> `web_search`, `generate_image`, `edit_image`, and `upload_image` are
-> registered, the MCP server still exposes the same capabilities under
-> prefixed names (`lunaroute_web_search`, `lunaroute_generate_image`, …).
-> The MCP registration stays because it also serves tools the first-class
-> set does not cover (e.g. `convert_document`), and OpenCode's MCP config
-> cannot filter individual tools of a registered server. See
-> [Web search](#web-search-web_search) and
-> [Image tools](#image-tools) for the full rule and the escape
-> hatches.
+> **Duplicate surface — endgame note.** The first-class tool set now covers
+> every capability the hosted MCP server offers: `web_search` (+ `web_fetch`
+> when it ships), `generate_image`, `edit_image`, `upload_image`, and
+> `convert_document`. The MCP server stays registered under prefixed names
+> (`lunaroute_web_search`, `lunaroute_generate_image`, …) for compatibility
+> — user scripts and flows may reference those names — and so that tools
+> the server adds later are available immediately, before a first-class
+> port lands. OpenCode's MCP config cannot filter individual tools of a
+> registered server; to suppress the MCP surface entirely, diverge the
+> `mcp.lunaroute` entry (see [MCP entry management](#mcp-entry-management)).
 
 ### MCP entry management
 
@@ -245,6 +245,37 @@ the server's `tools/list`, checked on every session start).
   needed.
 - **Disable**: `LUNAROUTE_IMAGE_TOOLS=off` / `{"imageTools": "off"}` —
   same semantics as the web tools.
+
+## Document conversion
+
+When you're logged in and the hosted LunaRoute MCP server offers it, the
+extension registers a first-class **`convert_document`** tool: documents
+(Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, PDF) and raster
+images (always OCR'd server-side) become Markdown, returned inline.
+
+- **Local safety first**: files are sniffed by content (ZIP-family / PDF /
+  RTF magics, strict UTF-8 for text) before any bytes leave the machine.
+  Plain text uploads only when it is genuinely CSV — from a `.csv` path, or
+  an extensionless path with an explicit `.csv` filename. Dotfiles and
+  hidden path components (`.ssh`, `.aws`, …) never leave as text, whatever
+  they claim; binaries are content-sniffed, never name-trusted (a PNG named
+  `notes.csv` is converted as an image, not read as text).
+- **Size**: files over the 10 MiB conversion ceiling are rejected before
+  upload (checked on the bytes actually read, so a swapped file can't sneak
+  through).
+- **Oversized output**: when the server stores the result as an artifact
+  (`output_too_large`), the tool retries once with `embed: false`, downloads
+  the artifact, and saves it to `$XDG_DATA_HOME/opencode/lunaroute-docs`
+  (default `~/.local/share/opencode/lunaroute-docs`, override with
+  `LUNAROUTE_DOCS_DIR`) — the model gets the path plus the document's
+  opening lines. Private by default (dir 0700 / files 0600); an explicit
+  override directory is respected as-is.
+- **Scanned PDFs**: with `ocr: false` (default) a scanned PDF answers
+  `needs_ocr` — rerun with `ocr: true` (the costly path is the model's
+  call).
+- **Key rotation**: the current key is re-read on every call.
+  **Disable**: `LUNAROUTE_CONVERT_TOOLS=off` / `{"convertTools": "off"}` —
+  same semantics as the other toggles.
 
 ## Configuration
 
