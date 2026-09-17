@@ -187,5 +187,9 @@ describe("defaultModelId", () => {
     expect(defaultModelId([mk("b"), mk("a"), mk("c")])).toBe("a");
     expect(defaultModelId([mk("b"), mk("a"), mk("a2")])).toBe("a");
   });
+  it("prefers glm-5.3-flash when present (kata nnvh)", () => {
+    const mk = (id: string): MappedModel => ({ id, name: id, reasoning: false, tool_call: true, attachment: false, limitContext: 1, limitOutput: 1, modalitiesInput: ["text"], variants: {} });
+    expect(defaultModelId([mk("glm-5.3"), mk("glm-5.3-flash"), mk("a-model")])).toBe("glm-5.3-flash");
+  });
   it("returns undefined when empty", () => expect(defaultModelId([])).toBeUndefined());
 });

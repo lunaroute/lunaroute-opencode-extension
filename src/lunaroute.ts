@@ -130,7 +130,13 @@ export function mapCatalog(entries: unknown[]): { models: MappedModel[]; skipped
   return { models, skipped };
 }
 
+// Preferred default for the post-login auto-pick (kata nnvh): the flash tier
+// over the full GLM 5.3, so a fresh login doesn't start on the flagship.
+export const PREFERRED_DEFAULT_MODEL_ID = "glm-5.3-flash";
+
 export function defaultModelId(models: MappedModel[]): string | undefined {
   if (!models.length) return undefined;
+  const preferred = models.find((m) => m.id === PREFERRED_DEFAULT_MODEL_ID);
+  if (preferred) return preferred.id;
   return [...models.map((m) => m.id)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0];
 }
