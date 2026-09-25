@@ -13,6 +13,30 @@ export function resolveApiUrl(env: NodeJS.ProcessEnv): string { return env.LUNAR
 export function resolveFrontUrl(env: NodeJS.ProcessEnv): string { return env.LUNAROUTE_FRONT_URL || DEFAULT_FRONT_URL; }
 export function resolveMcpUrl(env: NodeJS.ProcessEnv): string { return env.LUNAROUTE_MCP_URL || DEFAULT_MCP_URL; }
 
+// Wire-format kill switch. opencode derives each model's routing npm from
+// provider.npm: NPM_RESPONSES routes through its OpenAI Responses protocol,
+// NPM_COMPLETIONS through chat completions. Absent or empty means the
+// responses default; any other non-empty value warns and fails toward
+// completions, because a non-empty value is a deliberate override and a
+// failed kill switch should fail toward the established format.
+export type WireNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible";
+export const NPM_RESPONSES: WireNpm = "@ai-sdk/openai";
+export const NPM_COMPLETIONS: WireNpm = "@ai-sdk/openai-compatible";
+export const DEFAULT_NPM_API: WireNpm = NPM_RESPONSES;
+
+export function resolveApiNpm(env: NodeJS.ProcessEnv): WireNpm {
+  const raw = env.LUNAROUTE_API;
+  if (typeof raw !== "string" || raw.trim() === "") return DEFAULT_NPM_API;
+  const value = raw.trim().toLowerCase();
+  if (value === "responses") return NPM_RESPONSES;
+  if (value === "completions") return NPM_COMPLETIONS;
+  console.warn(
+    `[lunaroute] unrecognized LUNAROUTE_API=${JSON.stringify(raw)}; ` +
+      `falling back to ${NPM_COMPLETIONS} (valid values: responses | completions)`,
+  );
+  return NPM_COMPLETIONS;
+}
+
 export function buildAttributionHeaders(sessionId: string): Record<string, string> {
   return {
     "lunaroute-agent": DEVICE,

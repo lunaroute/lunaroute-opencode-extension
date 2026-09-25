@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub, toProviderModels } from "../src/models.js";
-import type { MappedModel } from "../src/lunaroute.js";
+import { resolveApiNpm, type MappedModel } from "../src/lunaroute.js";
 
 const mk = (id: string): MappedModel => ({ id, name: id, reasoning: false, tool_call: true, attachment: false, limitContext: 64000, limitOutput: 4096, modalitiesInput: ["text"], variants: {} });
 
@@ -30,12 +30,12 @@ describe("fetchCatalog", () => {
 
 describe("toProviderModels", () => {
   it("produces the ModelV2 shape with api.url/npm, limits, variants, zeros cost", () => {
-    const entry = Object.entries(toProviderModels([mk("m-1")], "http://gw/v1"))[0];
+    const entry = Object.entries(toProviderModels([mk("m-1")], "http://gw/v1", "@ai-sdk/openai"))[0];
     const model = entry[1];
     expect(model).toMatchObject({
       id: "m-1", name: "m-1", providerID: "lunaroute", attachment: false, reasoning: false,
       tool_call: true, status: "active",
-      api: { id: "m-1", url: "http://gw/v1", npm: "@ai-sdk/openai-compatible" },
+      api: { id: "m-1", url: "http://gw/v1", npm: "@ai-sdk/openai" },
       limit: { context: 64000, output: 4096 },
       cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
       modalities: { input: ["text"], output: ["text"] },
@@ -46,17 +46,48 @@ describe("toProviderModels", () => {
 describe("injectProviderStub", () => {
   it("fills name/npm/baseURL when absent", () => {
     const cfg: Record<string, unknown> = {};
-    injectProviderStub(cfg as never, "http://gw/v1");
-    expect(cfg.provider).toEqual({ lunaroute: { name: "LunaRoute", npm: "@ai-sdk/openai-compatible", options: { baseURL: "http://gw/v1" } } });
+    injectProviderStub(cfg as never, "http://gw/v1", "@ai-sdk/openai");
+    expect(cfg.provider).toEqual({ lunaroute: { name: "LunaRoute", npm: "@ai-sdk/openai", options: { baseURL: "http://gw/v1" } } });
   });
   it("preserves user-set fields (name, npm, baseURL) and merges options", () => {
     const cfg: Record<string, unknown> = { provider: { lunaroute: { name: "My LR", npm: "custom-pkg", options: { baseURL: "http://staging/v1", extra: 1 } } } };
-    injectProviderStub(cfg as never, "http://gw/v1");
+    injectProviderStub(cfg as never, "http://gw/v1", "@ai-sdk/openai");
     expect(cfg.provider).toEqual({ lunaroute: { name: "My LR", npm: "custom-pkg", options: { baseURL: "http://staging/v1", extra: 1 } } });
+  });
+  it("carries the completions kill-switch npm id through both call sites (kata hkt5)", () => {
+    const npm = resolveApiNpm({ LUNAROUTE_API: "completions" });
+    expect(npm).toBe("@ai-sdk/openai-compatible");
+    const cfg: Record<string, unknown> = {};
+    injectProviderStub(cfg as never, "http://gw/v1", npm);
+    injectModels(cfg as never, [mk("m-1")], "http://gw/v1", npm);
+    const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
+    expect(provider.npm).toBe("@ai-sdk/openai-compatible");
+    expect((provider.models as Record<string, { api: { npm: string } }>)["m-1"].api.npm).toBe("@ai-sdk/openai-compatible");
+  });
+  it("a user-pinned npm governs provider.npm, the value opencode routes on (kata hkt5)", () => {
+    // opencode derives every model's routing npm from provider.npm
+    // (packages/opencode/src/provider/provider.ts, 1.18.31); the per-model
+    // api.npm is not in that chain, so the pin governs routing through the
+    // stub alone.
+    const cfg: Record<string, unknown> = {
+      provider: { lunaroute: { npm: "@ai-sdk/openai-compatible" } },
+    };
+    injectProviderStub(cfg as never, "http://gw/v1", "@ai-sdk/openai");
+    injectModels(cfg as never, [mk("m-1")], "http://gw/v1", "@ai-sdk/openai");
+    const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
+    expect(provider.npm).toBe("@ai-sdk/openai-compatible");
+  });
+  it("treats a falsy, whitespace, or non-string pin as absent", () => {
+    for (const pin of ["", "   ", 0, null]) {
+      const cfg: Record<string, unknown> = { provider: { lunaroute: { npm: pin } } };
+      injectProviderStub(cfg as never, "http://gw/v1", "@ai-sdk/openai");
+      const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
+      expect(provider.npm).toBe("@ai-sdk/openai");
+    }
   });
   it("never sets models", () => {
     const cfg: Record<string, unknown> = {};
-    injectProviderStub(cfg as never, "http://gw/v1");
+    injectProviderStub(cfg as never, "http://gw/v1", "@ai-sdk/openai");
     expect((cfg.provider as Record<string, unknown>).lunaroute).not.toHaveProperty("models");
   });
 });
@@ -64,11 +95,11 @@ describe("injectProviderStub", () => {
 describe("injectModels", () => {
   it("sets provider.lunaroute.models from the mapped catalog (replaces prior)", () => {
     const cfg: Record<string, unknown> = {};
-    injectProviderStub(cfg as never, "http://gw/v1");
-    injectModels(cfg as never, [mk("m-1")], "http://gw/v1");
+    injectProviderStub(cfg as never, "http://gw/v1", "@ai-sdk/openai");
+    injectModels(cfg as never, [mk("m-1")], "http://gw/v1", "@ai-sdk/openai");
     const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
     expect(provider.models).toMatchObject({ "m-1": { id: "m-1", api: { url: "http://gw/v1" } } });
-    injectModels(cfg as never, [mk("m-2")], "http://gw/v1");
+    injectModels(cfg as never, [mk("m-2")], "http://gw/v1", "@ai-sdk/openai");
     expect(Object.keys((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models!)).toEqual(["m-2"]);
   });
 });
@@ -76,7 +107,7 @@ describe("injectModels", () => {
 describe("injectPlaceholderModel", () => {
   it("injects a labeled login placeholder when the provider has no models", () => {
     const cfg: Record<string, unknown> = {};
-    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1");
+    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1", "@ai-sdk/openai");
     expect(injected).toBe(true);
     const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
     expect(provider.models).toMatchObject({
@@ -85,7 +116,7 @@ describe("injectPlaceholderModel", () => {
         name: "Log in to load models",
         providerID: "lunaroute",
         status: "active",
-        api: { id: "login", url: "http://gw/v1", npm: "@ai-sdk/openai-compatible" },
+        api: { id: "login", url: "http://gw/v1", npm: "@ai-sdk/openai" },
       },
     });
   });
@@ -94,23 +125,23 @@ describe("injectPlaceholderModel", () => {
       provider: { lunaroute: { name: "My LR", models: { "user-model": { id: "user-model", name: "User's own" } } } },
     };
     const before = JSON.parse(JSON.stringify(cfg));
-    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1");
+    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1", "@ai-sdk/openai");
     expect(injected).toBe(false);
     expect(cfg).toEqual(before);
   });
   it("is idempotent: the second call is a no-op, not a duplicate", () => {
     const cfg: Record<string, unknown> = {};
-    injectPlaceholderModel(cfg as never, "http://gw/v1");
+    injectPlaceholderModel(cfg as never, "http://gw/v1", "@ai-sdk/openai");
     const afterFirst = JSON.parse(JSON.stringify(cfg));
-    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1");
+    const injected = injectPlaceholderModel(cfg as never, "http://gw/v1", "@ai-sdk/openai");
     expect(injected).toBe(false);
     expect(cfg).toEqual(afterFirst);
   });
   it("placeholder entries carry the same shape as real catalog entries", () => {
     const cfg: Record<string, unknown> = {};
-    injectPlaceholderModel(cfg as never, "http://gw/v1");
+    injectPlaceholderModel(cfg as never, "http://gw/v1", "@ai-sdk/openai");
     const placeholder = ((cfg.provider as Record<string, Record<string, unknown>>).lunaroute.models ?? {}) as Record<string, Record<string, unknown>>;
-    const real = toProviderModels([mk("m-1")], "http://gw/v1")["m-1"];
+    const real = toProviderModels([mk("m-1")], "http://gw/v1", "@ai-sdk/openai")["m-1"];
     expect(Object.keys(placeholder["login"]).sort()).toEqual(Object.keys(real).sort());
   });
 });

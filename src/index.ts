@@ -7,6 +7,7 @@ import {
   LUNAROUTE_PROVIDER,
   resolveMcpUrl,
   resolveRoutingUrl,
+  resolveApiNpm,
 } from "./lunaroute.js";
 import { createLunarouteAuth } from "./login.js";
 import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub } from "./models.js";
@@ -88,6 +89,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
   const home = deps.home ?? homedir();
   const sessionId = generateSessionId();
   const envRoutingUrl = resolveRoutingUrl(env);
+  const envApiNpm = resolveApiNpm(env);
   // One effective routing URL for every consumer (catalog, model api.url, paste
   // validation, auto-pick): user-set provider.lunaroute.options.baseURL wins over
   // the env URL — spec "Base URL precedence". Updated by the config hook after
@@ -247,7 +249,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
       config: async (cfg: Record<string, unknown>, runtime?: PluginRuntime) => {
         // Contributor 1: provider stub — always lands, individually isolated.
         try {
-          injectProviderStub(cfg, envRoutingUrl);
+          injectProviderStub(cfg, envRoutingUrl, envApiNpm);
           // Read the effective URL back: user-set baseURL or the env fallback
           // just injected — every later consumer in this hook uses this value.
           const stub = (cfg.provider as Record<string, { options?: { baseURL?: unknown } }> | undefined)?.lunaroute;
@@ -270,16 +272,16 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
                 // providers from its provider state, which would hide LunaRoute from
                 // /connect and /models entirely (kata 3xsy). injectPlaceholderModel
                 // is a no-op when models already exist, so a retained catalog is safe.
-                injectPlaceholderModel(cfg, effectiveRoutingUrl, UNAVAILABLE_MODELS_NAME);
+                injectPlaceholderModel(cfg, effectiveRoutingUrl, envApiNpm, UNAVAILABLE_MODELS_NAME);
               } else {
                 for (const s of result.skipped) log("warn", `LunaRoute: skipped catalog entry "${s.id}": ${s.reason}`);
                 if (result.skipped.length && !result.models.length) {
                   log("warn", `LunaRoute: catalog had ${result.skipped.length} invalid entries, all skipped`);
                 }
                 if (result.models.length > 0) {
-                  injectModels(cfg, result.models, effectiveRoutingUrl);
+                  injectModels(cfg, result.models, effectiveRoutingUrl, envApiNpm);
                 } else {
-                  injectPlaceholderModel(cfg, effectiveRoutingUrl, UNAVAILABLE_MODELS_NAME);
+                  injectPlaceholderModel(cfg, effectiveRoutingUrl, envApiNpm, UNAVAILABLE_MODELS_NAME);
                 }
               }
             } else {
@@ -288,7 +290,7 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
               // inject the labeled login placeholder — OpenCode drops zero-model
               // providers from its provider state, which would hide LunaRoute from
               // /connect entirely (dpd0).
-              injectPlaceholderModel(cfg, effectiveRoutingUrl);
+              injectPlaceholderModel(cfg, effectiveRoutingUrl, envApiNpm);
               if (resolution.state === "logged-out" && !firstRunHintShown) {
                 firstRunHintShown = true;
                 log("info", "Run /connect and choose LunaRoute to start using LunaRoute.");
