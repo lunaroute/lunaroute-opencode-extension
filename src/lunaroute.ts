@@ -18,23 +18,28 @@ export function resolveMcpUrl(env: NodeJS.ProcessEnv): string { return env.LUNAR
 // NPM_COMPLETIONS through chat completions. Absent or empty means the
 // responses default; any other non-empty value warns and fails toward
 // completions, because a non-empty value is a deliberate override and a
-// failed kill switch should fail toward the established format.
+// failed kill switch should fail toward the established format. The warning
+// is returned, not emitted: the resolver runs at factory time before any log
+// sink exists, so the caller routes it through the plugin's log contract.
 export type WireNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible";
 export const NPM_RESPONSES: WireNpm = "@ai-sdk/openai";
 export const NPM_COMPLETIONS: WireNpm = "@ai-sdk/openai-compatible";
 export const DEFAULT_NPM_API: WireNpm = NPM_RESPONSES;
 
-export function resolveApiNpm(env: NodeJS.ProcessEnv): WireNpm {
+export type ResolvedApiNpm = { npm: WireNpm; warning?: string };
+
+export function resolveApiNpm(env: NodeJS.ProcessEnv): ResolvedApiNpm {
   const raw = env.LUNAROUTE_API;
-  if (typeof raw !== "string" || raw.trim() === "") return DEFAULT_NPM_API;
+  if (typeof raw !== "string" || raw.trim() === "") return { npm: DEFAULT_NPM_API };
   const value = raw.trim().toLowerCase();
-  if (value === "responses") return NPM_RESPONSES;
-  if (value === "completions") return NPM_COMPLETIONS;
-  console.warn(
-    `[lunaroute] unrecognized LUNAROUTE_API=${JSON.stringify(raw)}; ` +
+  if (value === "responses") return { npm: NPM_RESPONSES };
+  if (value === "completions") return { npm: NPM_COMPLETIONS };
+  return {
+    npm: NPM_COMPLETIONS,
+    warning:
+      `LunaRoute: unrecognized LUNAROUTE_API=${JSON.stringify(raw)}; ` +
       `falling back to ${NPM_COMPLETIONS} (valid values: responses | completions)`,
-  );
-  return NPM_COMPLETIONS;
+  };
 }
 
 export function buildAttributionHeaders(sessionId: string): Record<string, string> {

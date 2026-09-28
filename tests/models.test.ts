@@ -55,7 +55,7 @@ describe("injectProviderStub", () => {
     expect(cfg.provider).toEqual({ lunaroute: { name: "My LR", npm: "custom-pkg", options: { baseURL: "http://staging/v1", extra: 1 } } });
   });
   it("carries the completions kill-switch npm id through both call sites (kata hkt5)", () => {
-    const npm = resolveApiNpm({ LUNAROUTE_API: "completions" });
+    const { npm } = resolveApiNpm({ LUNAROUTE_API: "completions" });
     expect(npm).toBe("@ai-sdk/openai-compatible");
     const cfg: Record<string, unknown> = {};
     injectProviderStub(cfg as never, "http://gw/v1", npm);
@@ -68,7 +68,8 @@ describe("injectProviderStub", () => {
     // opencode derives every model's routing npm from provider.npm
     // (packages/opencode/src/provider/provider.ts, 1.18.31); the per-model
     // api.npm is not in that chain, so the pin governs routing through the
-    // stub alone.
+    // stub alone. The per-model api.npm mirrors the pin (not the env-resolved
+    // default) so the injected config is internally consistent.
     const cfg: Record<string, unknown> = {
       provider: { lunaroute: { npm: "@ai-sdk/openai-compatible" } },
     };
@@ -76,6 +77,19 @@ describe("injectProviderStub", () => {
     injectModels(cfg as never, [mk("m-1")], "http://gw/v1", "@ai-sdk/openai");
     const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
     expect(provider.npm).toBe("@ai-sdk/openai-compatible");
+    expect((provider.models as Record<string, { api: { npm: string } }>)["m-1"].api.npm).toBe("@ai-sdk/openai-compatible");
+  });
+  it("trims surrounding whitespace from a pin", () => {
+    const cfg: Record<string, unknown> = {
+      provider: { lunaroute: { npm: "  custom-pkg  " } },
+    };
+    injectProviderStub(cfg as never, "http://gw/v1", "@ai-sdk/openai");
+    injectModels(cfg as never, [mk("m-1")], "http://gw/v1", "@ai-sdk/openai");
+    const provider = (cfg.provider as Record<string, Record<string, unknown>>).lunaroute;
+    // opencode passes provider.npm verbatim to its package loader, so an
+    // untrimmed pin would fail at load; the pin predicate trims.
+    expect(provider.npm).toBe("custom-pkg");
+    expect((provider.models as Record<string, { api: { npm: string } }>)["m-1"].api.npm).toBe("custom-pkg");
   });
   it("treats a falsy, whitespace, or non-string pin as absent", () => {
     for (const pin of ["", "   ", 0, null]) {
