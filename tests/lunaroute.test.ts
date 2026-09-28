@@ -17,39 +17,36 @@ describe("env resolvers + defaults", () => {
 
 describe("resolveApiNpm (LUNAROUTE_API kill switch, kata hkt5)", () => {
   it("defaults to the Responses protocol npm id when absent or empty", () => {
-    expect(resolveApiNpm({})).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({}).npm).toBe("@ai-sdk/openai");
     expect(DEFAULT_NPM_API).toBe("@ai-sdk/openai");
-    expect(resolveApiNpm({ LUNAROUTE_API: "" })).toBe("@ai-sdk/openai");
-    expect(resolveApiNpm({ LUNAROUTE_API: "  " })).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({ LUNAROUTE_API: "" }).npm).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({ LUNAROUTE_API: "  " }).npm).toBe("@ai-sdk/openai");
   });
   it("accepts responses, case-insensitively and trimmed", () => {
-    expect(resolveApiNpm({ LUNAROUTE_API: "responses" })).toBe("@ai-sdk/openai");
-    expect(resolveApiNpm({ LUNAROUTE_API: "  Responses  " })).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({ LUNAROUTE_API: "responses" }).npm).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({ LUNAROUTE_API: "  Responses  " }).npm).toBe("@ai-sdk/openai");
   });
   it("accepts completions as the kill switch, case-insensitively", () => {
-    expect(resolveApiNpm({ LUNAROUTE_API: "completions" })).toBe("@ai-sdk/openai-compatible");
-    expect(resolveApiNpm({ LUNAROUTE_API: "Completions" })).toBe("@ai-sdk/openai-compatible");
+    expect(resolveApiNpm({ LUNAROUTE_API: "completions" }).npm).toBe("@ai-sdk/openai-compatible");
+    expect(resolveApiNpm({ LUNAROUTE_API: "Completions" }).npm).toBe("@ai-sdk/openai-compatible");
+  });
+  it("returns no warning for recognized values", () => {
+    expect(resolveApiNpm({}).warning).toBeUndefined();
+    expect(resolveApiNpm({ LUNAROUTE_API: "responses" }).warning).toBeUndefined();
+    expect(resolveApiNpm({ LUNAROUTE_API: "completions" }).warning).toBeUndefined();
   });
   it("does not accept npm-id or alias spellings", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      expect(resolveApiNpm({ LUNAROUTE_API: "@ai-sdk/openai" })).toBe("@ai-sdk/openai-compatible");
-      expect(resolveApiNpm({ LUNAROUTE_API: "openai-responses" })).toBe("@ai-sdk/openai-compatible");
-      expect(resolveApiNpm({ LUNAROUTE_API: "chat" })).toBe("@ai-sdk/openai-compatible");
-      expect(warn).toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
+    for (const value of ["@ai-sdk/openai", "openai-responses", "chat"]) {
+      const resolved = resolveApiNpm({ LUNAROUTE_API: value });
+      expect(resolved.npm).toBe("@ai-sdk/openai-compatible");
+      expect(resolved.warning).toContain("LUNAROUTE_API");
     }
   });
-  it("warns and fails toward completions on an unrecognized value", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      expect(resolveApiNpm({ LUNAROUTE_API: "respons" })).toBe("@ai-sdk/openai-compatible");
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(String(warn.mock.calls[0][0])).toContain("LUNAROUTE_API");
-    } finally {
-      warn.mockRestore();
-    }
+  it("returns a warning and fails toward completions on an unrecognized value", () => {
+    const resolved = resolveApiNpm({ LUNAROUTE_API: "respons" });
+    expect(resolved.npm).toBe("@ai-sdk/openai-compatible");
+    expect(resolved.warning).toContain("LUNAROUTE_API");
+    expect(resolved.warning).toContain("respons");
   });
 });
 

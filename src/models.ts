@@ -29,16 +29,18 @@ export type ProviderModel = Record<string, unknown>;
 
 /** Sole pin predicate, read by the stub: the provider's npm is the value
  * opencode routes every model on, so a pin must resolve identically wherever
- * it is read. A non-string or whitespace-only value counts as absent. A pin
- * is an arbitrary npm id, trusted verbatim; WireNpm narrows only the values
- * the resolver produces. */
+ * it is read. A non-string or whitespace-only value counts as absent; a
+ * present string is trimmed (matching the resolver's env trimming, since
+ * opencode passes provider.npm verbatim to its package loader) and the
+ * remainder is trusted verbatim. A pin is an arbitrary npm id; WireNpm
+ * narrows only the values the resolver produces. */
 const pickNpm = (v: unknown, fallback: WireNpm): string =>
-  typeof v === "string" && v.trim() ? v : fallback;
+  typeof v === "string" && v.trim() ? v.trim() : fallback;
 
 export function toProviderModels(
   models: MappedModel[],
   baseUrl: string,
-  npm: WireNpm,
+  npm: string,
 ): Record<string, ProviderModel> {
   const out: Record<string, ProviderModel> = {};
   for (const m of models) {
@@ -92,8 +94,10 @@ export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: st
   const provider = providers[LUNAROUTE_PROVIDER] ?? {};
   // opencode derives every model's routing npm from provider.npm
   // (packages/opencode/src/provider/provider.ts, 1.18.31), so the per-model
-  // api.npm written here is shape parity, not a routing input.
-  provider.models = toProviderModels(models, baseUrl, npm);
+  // api.npm written here is shape parity, not a routing input. It mirrors the
+  // pinned provider.npm (set by injectProviderStub) so the config is
+  // internally consistent instead of carrying the env-resolved default.
+  provider.models = toProviderModels(models, baseUrl, pickNpm(provider.npm, npm));
   providers[LUNAROUTE_PROVIDER] = provider;
 }
 
@@ -113,6 +117,8 @@ export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string, npm: Wi
   const provider = providers[LUNAROUTE_PROVIDER] ?? {};
   const existing = (provider.models ?? {}) as Record<string, unknown>;
   if (Object.keys(existing).length > 0) return false;
+  // Mirrors injectModels: the placeholder's api.npm carries the pinned
+  // provider.npm (set by injectProviderStub) for internal consistency.
   provider.models = toProviderModels(
     [
       {
@@ -128,7 +134,7 @@ export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string, npm: Wi
       },
     ],
     baseUrl,
-    npm,
+    pickNpm(provider.npm, npm),
   );
   providers[LUNAROUTE_PROVIDER] = provider;
   return true;

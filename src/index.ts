@@ -89,7 +89,11 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
   const home = deps.home ?? homedir();
   const sessionId = generateSessionId();
   const envRoutingUrl = resolveRoutingUrl(env);
-  const envApiNpm = resolveApiNpm(env);
+  const { npm: envApiNpm, warning: envApiWarning } = resolveApiNpm(env);
+  // The kill-switch warning is emitted through the plugin's log contract on
+  // the first invocation (the resolver runs before any log sink exists), once
+  // per process.
+  let apiWarningShown = false;
   // One effective routing URL for every consumer (catalog, model api.url, paste
   // validation, auto-pick): user-set provider.lunaroute.options.baseURL wins over
   // the env URL — spec "Base URL precedence". Updated by the config hook after
@@ -137,6 +141,10 @@ export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
     };
     const log: PluginLog = deps.log ?? clientLogOf(input?.client) ?? noopLog;
     logRef.current = log;
+    if (envApiWarning && !apiWarningShown) {
+      apiWarningShown = true;
+      log("warn", envApiWarning);
+    }
 
     /** Resolve the current default model from either SDK get() shape (wrapped or flat). */
     const currentModelOf = (cfg: { data?: { model?: string }; model?: string } | undefined | null): string | undefined =>
