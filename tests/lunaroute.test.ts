@@ -4,7 +4,7 @@ import {
   LUNAROUTE_PROVIDER, buildAttributionHeaders, buildDeviceAuthUrl, buildExchangeBody,
   computePkceChallenge, credentialFingerprint, generatePkceVerifier, generateSessionId,
   generateState, isValidCredentialShape, parseCallbackQuery,
-  mapCatalog, mapCatalogEntry, defaultModelId, resolveApiNpm, DEFAULT_NPM_API,
+  mapCatalog, mapCatalogEntry, defaultModelId, resolveApiNpm, DEFAULT_NPM_API, NON_CHAT_CAPABILITIES,
   type MappedModel,
 } from "../src/lunaroute.js";
 
@@ -159,7 +159,8 @@ describe("catalog mapping", () => {
   });
   // Non-chat capability families are tagged by the gateway on capabilities (pi gx0e + p4eh
   // parity): image_generation (flux2-klein & co), embeddings (emb-granite, emb-nomic-code,
-  // emb-nomic-moe, emb-qwen3), rerank (bge-rr-v2-m3). They must never surface as chat models.
+  // emb-nomic-moe, emb-qwen3), rerank (bge-rr-v2-m3), transcription (whisper-large-v3, pi
+  // yc37 parity). They must never surface as chat models.
   it("skips image-generation models with a typed non-chat reason (live-catalog shape)", () => {
     expect(mapCatalogEntry({ id: "flux2-klein", display_name: "Flux 2 Klein", capabilities: { image_generation: true, tools: true } }))
       .toEqual({ ok: false, reason: "non_chat_capability (image_generation)" });
@@ -172,13 +173,23 @@ describe("catalog mapping", () => {
     expect(mapCatalogEntry({ id: "bge-rr-v2-m3", display_name: "bge-rr-v2-m3", context_window: 8192, capabilities: { rerank: true } }))
       .toEqual({ ok: false, reason: "non_chat_capability (rerank)" });
   });
+  it("skips audio/transcription models with a typed non-chat reason (live-catalog shape, pi yc37 parity)", () => {
+    expect(mapCatalogEntry({ id: "whisper-large-v3", display_name: "Whisper Large V3", capabilities: { transcription: true, tools: true } }))
+      .toEqual({ ok: false, reason: "non_chat_capability (transcription)" });
+  });
+  it("every exported non-chat capability is skipped with its own typed reason", () => {
+    for (const capability of NON_CHAT_CAPABILITIES) {
+      expect(mapCatalogEntry({ id: `m-${capability}`, capabilities: { [capability]: true, reasoning: true } }))
+        .toEqual({ ok: false, reason: `non_chat_capability (${capability})` });
+    }
+  });
   it("non-chat check takes precedence: an image model with reasoning:true never surfaces as a chat model", () => {
     const r = mapCatalogEntry({ id: "weird", capabilities: { image_generation: true, reasoning: true } });
     expect(r).toEqual({ ok: false, reason: "non_chat_capability (image_generation)" });
   });
   it("explicit false and absent capabilities still map as chat models", () => {
     for (const caps of [
-      { image_generation: false, embeddings: false, rerank: false },
+      { image_generation: false, embeddings: false, rerank: false, transcription: false },
       { reasoning: true, vision: true },
       undefined,
     ]) {
@@ -207,12 +218,14 @@ describe("mapCatalog", () => {
       { id: "flux2-klein", capabilities: { image_generation: true } },
       { id: "emb-granite", capabilities: { embeddings: true } },
       { id: "bge-rr-v2-m3", capabilities: { rerank: true } },
+      { id: "whisper-large-v3", capabilities: { transcription: true } },
     ]);
     expect(models.map((m) => m.id)).toEqual(["gpt-x"]);
     expect(skipped).toEqual([
       { id: "flux2-klein", reason: "non_chat_capability (image_generation)" },
       { id: "emb-granite", reason: "non_chat_capability (embeddings)" },
       { id: "bge-rr-v2-m3", reason: "non_chat_capability (rerank)" },
+      { id: "whisper-large-v3", reason: "non_chat_capability (transcription)" },
     ]);
   });
 });

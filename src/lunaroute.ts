@@ -110,9 +110,9 @@ export type CatalogMappingResult = { ok: true; model: MappedModel } | { ok: fals
 
 // Catalog input is untrusted remote input — validation never trusts the source.
 /** Capability families that are not chat models (gateway tags them on capabilities;
- * pi gx0e + p4eh parity). Table-driven so a future family is a one-line addition.
+ * pi gx0e + p4eh + yc37 parity). Table-driven so a future family is a one-line addition.
  * Explicit `false` is not a tag — only a truthy value marks the family. */
-const NON_CHAT_CAPABILITIES: readonly string[] = ["image_generation", "embeddings", "rerank"];
+export const NON_CHAT_CAPABILITIES: readonly string[] = ["image_generation", "embeddings", "rerank", "transcription"];
 
 export function mapCatalogEntry(entry: unknown): CatalogMappingResult {
   if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return { ok: false, reason: "not an object" };
