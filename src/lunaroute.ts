@@ -13,6 +13,35 @@ export function resolveApiUrl(env: NodeJS.ProcessEnv): string { return env.LUNAR
 export function resolveFrontUrl(env: NodeJS.ProcessEnv): string { return env.LUNAROUTE_FRONT_URL || DEFAULT_FRONT_URL; }
 export function resolveMcpUrl(env: NodeJS.ProcessEnv): string { return env.LUNAROUTE_MCP_URL || DEFAULT_MCP_URL; }
 
+// Wire-format kill switch. opencode derives each model's routing npm from
+// provider.npm: NPM_RESPONSES routes through its OpenAI Responses protocol,
+// NPM_COMPLETIONS through chat completions. Absent or empty means the
+// responses default; any other non-empty value warns and fails toward
+// completions, because a non-empty value is a deliberate override and a
+// failed kill switch should fail toward the established format. The warning
+// is returned, not emitted: the resolver runs at factory time before any log
+// sink exists, so the caller routes it through the plugin's log contract.
+export type WireNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible";
+export const NPM_RESPONSES: WireNpm = "@ai-sdk/openai";
+export const NPM_COMPLETIONS: WireNpm = "@ai-sdk/openai-compatible";
+export const DEFAULT_NPM_API: WireNpm = NPM_RESPONSES;
+
+export type ResolvedApiNpm = { npm: WireNpm; warning?: string };
+
+export function resolveApiNpm(env: NodeJS.ProcessEnv): ResolvedApiNpm {
+  const raw = env.LUNAROUTE_API;
+  if (typeof raw !== "string" || raw.trim() === "") return { npm: DEFAULT_NPM_API };
+  const value = raw.trim().toLowerCase();
+  if (value === "responses") return { npm: NPM_RESPONSES };
+  if (value === "completions") return { npm: NPM_COMPLETIONS };
+  return {
+    npm: NPM_COMPLETIONS,
+    warning:
+      `LunaRoute: unrecognized LUNAROUTE_API=${JSON.stringify(raw)}; ` +
+      `falling back to ${NPM_COMPLETIONS} (valid values: responses | completions)`,
+  };
+}
+
 export function buildAttributionHeaders(sessionId: string): Record<string, string> {
   return {
     "lunaroute-agent": DEVICE,
@@ -130,7 +159,13 @@ export function mapCatalog(entries: unknown[]): { models: MappedModel[]; skipped
   return { models, skipped };
 }
 
+// Preferred default for the post-login auto-pick (kata nnvh): the flash tier
+// over the full GLM 5.3, so a fresh login doesn't start on the flagship.
+export const PREFERRED_DEFAULT_MODEL_ID = "glm-5.3-flash";
+
 export function defaultModelId(models: MappedModel[]): string | undefined {
   if (!models.length) return undefined;
+  const preferred = models.find((m) => m.id === PREFERRED_DEFAULT_MODEL_ID);
+  if (preferred) return preferred.id;
   return [...models.map((m) => m.id)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0];
 }

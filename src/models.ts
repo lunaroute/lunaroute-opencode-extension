@@ -1,4 +1,4 @@
-import { buildAttributionHeaders, LUNAROUTE_PROVIDER, mapCatalog, type MappedModel } from "./lunaroute.js";
+import { buildAttributionHeaders, LUNAROUTE_PROVIDER, mapCatalog, type MappedModel, type WireNpm } from "./lunaroute.js";
 
 export type ConfigLike = Record<string, unknown>;
 
@@ -27,7 +27,21 @@ export async function fetchCatalog(
 
 export type ProviderModel = Record<string, unknown>;
 
-export function toProviderModels(models: MappedModel[], baseUrl: string): Record<string, ProviderModel> {
+/** Sole pin predicate, read by the stub: the provider's npm is the value
+ * opencode routes every model on, so a pin must resolve identically wherever
+ * it is read. A non-string or whitespace-only value counts as absent; a
+ * present string is trimmed (matching the resolver's env trimming, since
+ * opencode passes provider.npm verbatim to its package loader) and the
+ * remainder is trusted verbatim. A pin is an arbitrary npm id; WireNpm
+ * narrows only the values the resolver produces. */
+const pickNpm = (v: unknown, fallback: WireNpm): string =>
+  typeof v === "string" && v.trim() ? v.trim() : fallback;
+
+export function toProviderModels(
+  models: MappedModel[],
+  baseUrl: string,
+  npm: string,
+): Record<string, ProviderModel> {
   const out: Record<string, ProviderModel> = {};
   for (const m of models) {
     out[m.id] = {
@@ -41,7 +55,7 @@ export function toProviderModels(models: MappedModel[], baseUrl: string): Record
       temperature: true,
       tool_call: m.tool_call,
       modalities: { input: m.modalitiesInput, output: ["text"] },
-      api: { id: m.id, url: baseUrl, npm: "@ai-sdk/openai-compatible" },
+      api: { id: m.id, url: baseUrl, npm },
       capabilities: {
         temperature: true, reasoning: m.reasoning, attachment: m.attachment, toolcall: m.tool_call,
         input: { text: true, image: m.attachment, audio: false, video: false, pdf: false },
@@ -59,7 +73,7 @@ export function toProviderModels(models: MappedModel[], baseUrl: string): Record
   return out;
 }
 
-export function injectProviderStub(cfg: ConfigLike, routingUrl: string): void {
+export function injectProviderStub(cfg: ConfigLike, routingUrl: string, npm: WireNpm): void {
   const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
   cfg.provider = providers;
   const existing = providers[LUNAROUTE_PROVIDER];
@@ -67,17 +81,23 @@ export function injectProviderStub(cfg: ConfigLike, routingUrl: string): void {
   providers[LUNAROUTE_PROVIDER] = {
     ...existing,
     name: existing?.name ?? "LunaRoute",
-    npm: existing?.npm ?? "@ai-sdk/openai-compatible",
+    // A user-pinned npm wins over the resolved default.
+    npm: pickNpm(existing?.npm, npm),
     options: { ...existingOptions, baseURL: existingOptions.baseURL ?? routingUrl },
   };
 }
 
 /** Catalog is the source of truth when logged in: fetched models replace provider.lunaroute.models. */
-export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: string): void {
+export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: string, npm: WireNpm): void {
   const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
   cfg.provider = providers;
   const provider = providers[LUNAROUTE_PROVIDER] ?? {};
-  provider.models = toProviderModels(models, baseUrl);
+  // opencode derives every model's routing npm from provider.npm
+  // (packages/opencode/src/provider/provider.ts, 1.18.31), so the per-model
+  // api.npm written here is shape parity, not a routing input. It mirrors the
+  // pinned provider.npm (set by injectProviderStub) so the config is
+  // internally consistent instead of carrying the env-resolved default.
+  provider.models = toProviderModels(models, baseUrl, pickNpm(provider.npm, npm));
   providers[LUNAROUTE_PROVIDER] = provider;
 }
 
@@ -91,12 +111,14 @@ export const PLACEHOLDER_MODEL_ID = "login";
  * single labeled placeholder keeps the provider connectable and tells the user
  * what to do. Additive-only: existing models (user-written or catalog) always
  * win; the post-login catalog replaces the placeholder wholesale. */
-export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string, name = "Log in to load models"): boolean {
+export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string, npm: WireNpm, name = "Log in to load models"): boolean {
   const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
   cfg.provider = providers;
   const provider = providers[LUNAROUTE_PROVIDER] ?? {};
   const existing = (provider.models ?? {}) as Record<string, unknown>;
   if (Object.keys(existing).length > 0) return false;
+  // Mirrors injectModels: the placeholder's api.npm carries the pinned
+  // provider.npm (set by injectProviderStub) for internal consistency.
   provider.models = toProviderModels(
     [
       {
@@ -112,6 +134,7 @@ export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string, name = 
       },
     ],
     baseUrl,
+    pickNpm(provider.npm, npm),
   );
   providers[LUNAROUTE_PROVIDER] = provider;
   return true;

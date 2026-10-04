@@ -1,16 +1,52 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createHash } from "node:crypto";
 import {
   LUNAROUTE_PROVIDER, buildAttributionHeaders, buildDeviceAuthUrl, buildExchangeBody,
   computePkceChallenge, credentialFingerprint, generatePkceVerifier, generateSessionId,
   generateState, isValidCredentialShape, parseCallbackQuery,
-  mapCatalog, mapCatalogEntry, defaultModelId, NON_CHAT_CAPABILITIES, type MappedModel,
+  mapCatalog, mapCatalogEntry, defaultModelId, resolveApiNpm, DEFAULT_NPM_API, NON_CHAT_CAPABILITIES,
+  type MappedModel,
 } from "../src/lunaroute.js";
 
 describe("env resolvers + defaults", () => {
   it("builds the device-auth URL for opencode", () => {
     expect(buildDeviceAuthUrl("https://app.lunaroute.com", 39999, "st-1", "ch-1"))
       .toBe("https://app.lunaroute.com/device-auth/opencode?port=39999&state=st-1&challenge=ch-1");
+  });
+});
+
+describe("resolveApiNpm (LUNAROUTE_API kill switch, kata hkt5)", () => {
+  it("defaults to the Responses protocol npm id when absent or empty", () => {
+    expect(resolveApiNpm({}).npm).toBe("@ai-sdk/openai");
+    expect(DEFAULT_NPM_API).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({ LUNAROUTE_API: "" }).npm).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({ LUNAROUTE_API: "  " }).npm).toBe("@ai-sdk/openai");
+  });
+  it("accepts responses, case-insensitively and trimmed", () => {
+    expect(resolveApiNpm({ LUNAROUTE_API: "responses" }).npm).toBe("@ai-sdk/openai");
+    expect(resolveApiNpm({ LUNAROUTE_API: "  Responses  " }).npm).toBe("@ai-sdk/openai");
+  });
+  it("accepts completions as the kill switch, case-insensitively", () => {
+    expect(resolveApiNpm({ LUNAROUTE_API: "completions" }).npm).toBe("@ai-sdk/openai-compatible");
+    expect(resolveApiNpm({ LUNAROUTE_API: "Completions" }).npm).toBe("@ai-sdk/openai-compatible");
+  });
+  it("returns no warning for recognized values", () => {
+    expect(resolveApiNpm({}).warning).toBeUndefined();
+    expect(resolveApiNpm({ LUNAROUTE_API: "responses" }).warning).toBeUndefined();
+    expect(resolveApiNpm({ LUNAROUTE_API: "completions" }).warning).toBeUndefined();
+  });
+  it("does not accept npm-id or alias spellings", () => {
+    for (const value of ["@ai-sdk/openai", "openai-responses", "chat"]) {
+      const resolved = resolveApiNpm({ LUNAROUTE_API: value });
+      expect(resolved.npm).toBe("@ai-sdk/openai-compatible");
+      expect(resolved.warning).toContain("LUNAROUTE_API");
+    }
+  });
+  it("returns a warning and fails toward completions on an unrecognized value", () => {
+    const resolved = resolveApiNpm({ LUNAROUTE_API: "respons" });
+    expect(resolved.npm).toBe("@ai-sdk/openai-compatible");
+    expect(resolved.warning).toContain("LUNAROUTE_API");
+    expect(resolved.warning).toContain("respons");
   });
 });
 
@@ -199,6 +235,10 @@ describe("defaultModelId", () => {
     const mk = (id: string): MappedModel => ({ id, name: id, reasoning: false, tool_call: true, attachment: false, limitContext: 1, limitOutput: 1, modalitiesInput: ["text"], variants: {} });
     expect(defaultModelId([mk("b"), mk("a"), mk("c")])).toBe("a");
     expect(defaultModelId([mk("b"), mk("a"), mk("a2")])).toBe("a");
+  });
+  it("prefers glm-5.3-flash when present (kata nnvh)", () => {
+    const mk = (id: string): MappedModel => ({ id, name: id, reasoning: false, tool_call: true, attachment: false, limitContext: 1, limitOutput: 1, modalitiesInput: ["text"], variants: {} });
+    expect(defaultModelId([mk("glm-5.3"), mk("glm-5.3-flash"), mk("a-model")])).toBe("glm-5.3-flash");
   });
   it("returns undefined when empty", () => expect(defaultModelId([])).toBeUndefined());
 });

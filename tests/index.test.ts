@@ -583,4 +583,25 @@ describe("settings: MCP toggle + malformed-file warn (kata f2aj)", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("routes the LUNAROUTE_API kill-switch warning through the log sink, once per process", async () => {
+    const logs: { level: string; message: string }[] = [];
+    const plugin = createLunaroutePlugin({
+      env: { ...ENV, LUNAROUTE_API: "typo" } as NodeJS.ProcessEnv,
+      home: "/fake/home",
+      log: (level, message) => logs.push({ level, message }),
+    });
+    const hooks = await plugin({});
+    const warns = logs.filter((l) => l.message.includes("LUNAROUTE_API"));
+    expect(warns).toHaveLength(1);
+    expect(warns[0].level).toBe("warn");
+    expect(warns[0].message).toContain("typo");
+    // Second invocation (a new OpenCode instance in the same process) must
+    // not re-warn.
+    await plugin({});
+    expect(logs.filter((l) => l.message.includes("LUNAROUTE_API"))).toHaveLength(1);
+    // The resolver itself no longer writes to the console: the plugin's log
+    // contract is the only sink.
+    expect(logs.every((l) => !l.message.startsWith("[lunaroute]"))).toBe(true);
+  });
 });
