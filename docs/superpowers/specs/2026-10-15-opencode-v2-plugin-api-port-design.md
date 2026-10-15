@@ -33,7 +33,7 @@ on the frozen 0.3.1 line.
 
 ## Locked decisions
 
-1. v2-only, released as **1.0.0**; README + release notes tell OpenCode 1.x users to pin
+1. v2-only, released as **0.4.0**; README + release notes tell OpenCode 1.x users to pin
    `@lunaroute/opencode-extension@0.3.1`.
 2. TUI port + `models-refresh` in scope.
 3. No placeholder model. v2 `/connect` lists integrations, not models; verify zero-model
