@@ -29,7 +29,7 @@ import {
 import { buildWebToolMap, listServerToolDescriptors } from "./web-tools.js";
 import { buildImageToolMap } from "./image-tools.js";
 import { buildConvertToolMap } from "./convert-tools.js";
-import { toV2Result, type ToolDefinition as ToolDefinitionLike } from "./tool-api.js";
+import { toV2Result, z, type ToolDefinition as ToolDefinitionLike } from "./tool-api.js";
 
 /**
  * LunaRoute plugin, OpenCode v2 (kata 4qqn).
@@ -190,6 +190,9 @@ export default Plugin.define({
           name,
           description: def.description,
           input: def.input,
+          // v2's runtime dies on an `output` result without a declared output
+          // schema; every ported tool returns a string output (kata fhk4).
+          output: z.string(),
           execute: async (input: unknown, context: { signal: AbortSignal }) =>
             toV2Result(await def.execute(input, context)),
         } as never);
