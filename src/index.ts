@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import type { AuthHook, Plugin, ToolDefinition } from "@opencode-ai/plugin";
+import { Plugin } from "@opencode/plugin";
 import {
   buildAttributionHeaders,
   defaultModelId,
@@ -7,348 +7,212 @@ import {
   LUNAROUTE_PROVIDER,
   resolveMcpUrl,
   resolveRoutingUrl,
-  resolveApiNpm,
+  type MappedModel,
 } from "./lunaroute.js";
-import { createLunarouteAuth } from "./login.js";
-import { createCatalogMemo, fetchCatalog, injectModels, injectPlaceholderModel, injectProviderStub } from "./models.js";
-import { createMcpReconciler, resolveAuthState, resolveAuthStorePath, type AuthStoreFS } from "./mcp.js";
-import { mcpEnabled, convertToolsEnabled, imageToolsEnabled, readSettings, webToolsEnabled } from "./settings.js";
-import { buildConvertToolMap } from "./convert-tools.js";
-import { buildImageToolMap } from "./image-tools.js";
+import { fetchCatalog } from "./models.js";
+import { createLunarouteProvider, type ProviderCtxLike } from "./provider.js";
+import {
+  createCredentialReader,
+  createLunarouteIntegration,
+  type ConnectionCtxLike,
+  type IntegrationCtxLike,
+} from "./integration.js";
+import { createLunarouteMcp, type AuthResolution, type McpCtxLike } from "./mcp.js";
+import { resolveWire } from "./wire.js";
+import {
+  convertToolsEnabled,
+  imageToolsEnabled,
+  mcpEnabled,
+  readSettings,
+  webToolsEnabled,
+} from "./settings.js";
 import { buildWebToolMap, listServerToolDescriptors } from "./web-tools.js";
+import { buildImageToolMap } from "./image-tools.js";
+import { buildConvertToolMap } from "./convert-tools.js";
+import { toV2Result, type ToolDefinition as ToolDefinitionLike } from "./tool-api.js";
 
-/** Placeholder model label for a logged-in user whose catalog could not be
- * loaded (fetch failure or empty catalog) — distinct from the logged-out
- * "Log in to load models" default. Keeps the provider visible in /connect
- * instead of being dropped as a zero-model provider (kata 3xsy). */
-const UNAVAILABLE_MODELS_NAME = "Couldn't load models — check connection and restart";
+/**
+ * LunaRoute plugin, OpenCode v2 (kata 4qqn).
+ *
+ * The v1 entry returned hooks from a function; v2 default-exports
+ * `Plugin.define({ id, setup })` with transforms/hooks registered on the
+ * context. Everything async happens here in setup (or on credential events);
+ * the transforms themselves are synchronous replays over captured state.
+ * v2 owns the credential store, so the key comes from the provider's
+ * integration connection instead of the v1 auth.json reads.
+ */
 
 export type PluginLog = (level: "info" | "warn", message: string) => void;
 
-/**
- * Structural slice of the OpenCode SDK client used by the post-login
- * default-model pick. The real client carries far more surface; we only
- * depend on `config.get()` (→ `{ data }`) and `config.update()` (deep-merge
- * PATCH of the payload into the instance `config.json` — spike-verified).
- */
-export type TestClient = {
-  config: {
-    // get() may return the wrapped `{ data }` shape or the flat config object
-    // directly — not spike-verified which, so the read is shape-tolerant.
-    get(): Promise<{ data?: { model?: string; provider?: unknown }; model?: string; provider?: unknown }>;
-    update(body: { config: { model: string } }): Promise<unknown>;
-  };
-  /** Optional server-side log sink (POST /log → instance log). Present on the
-   * real SDK client; production logging routes through it because PluginInput
-   * carries no logger (verified in the plugin types + live-apply spike). */
-  app?: { log(args: { body: { service: string; level: "debug" | "info" | "warn" | "error"; message: string } }): Promise<unknown> };
-};
+/** Tool map entry shape as the v2 editor takes it; the tool modules produce
+ * v1-shaped results through src/tool-api.ts and the transform converts them. */
+type ToolInfoLike = ToolDefinitionLike;
 
-/**
- * Test doubles for the config hook's second argument. OpenCode itself calls
- * `config(input)` with one argument; the optional runtime param lets tests
- * (and only tests) pin the auth-store path, the auth-store FS, and the client.
- */
-export type PluginRuntime = {
-  storeKey?: string;
-  fs?: AuthStoreFS;
-  client?: TestClient;
-};
+export default Plugin.define({
+  id: "lunaroute",
+  async setup(ctx) {
+    const env = process.env;
+    const home = homedir();
+    const sessionId = generateSessionId();
+    const routingUrl = resolveRoutingUrl(env);
+    const mcpUrl = resolveMcpUrl(env);
+    const wire = resolveWire(env);
 
-export type PluginDeps = {
-  env?: NodeJS.ProcessEnv;
-  home?: string;
-  log?: PluginLog;
-  client?: TestClient;
-  /** Auth-store seam for the first-class web-tools gate, which runs at
-   * factory-invocation time — the config hook's runtime seam does not reach it. */
-  fs?: AuthStoreFS;
-  storeKey?: string;
-};
-
-export type LunarouteHooks = {
-  config: (cfg: Record<string, unknown>, runtime?: PluginRuntime) => Promise<void>;
-  auth: AuthHook;
-  "chat.headers": (
-    req: { provider?: { info?: { id?: string } } },
-    output: { headers: Record<string, string> },
-  ) => Promise<void>;
-  tool?: Record<string, ToolDefinition>;
-  dispose: () => Promise<void>;
-};
-
-export type LunaroutePlugin = (input: { client?: TestClient }, _options?: unknown) => Promise<LunarouteHooks>;
-
-/**
- * Build the LunaRoute plugin. One call per process: the session id, catalog
- * memo, MCP reconciler state, and the first-run hint flag are shared by every
- * invocation of the returned function (OpenCode may invoke it per instance).
- */
-export function createLunaroutePlugin(deps: PluginDeps = {}): LunaroutePlugin {
-  const env = deps.env ?? process.env;
-  const home = deps.home ?? homedir();
-  const sessionId = generateSessionId();
-  const envRoutingUrl = resolveRoutingUrl(env);
-  const { npm: envApiNpm, warning: envApiWarning } = resolveApiNpm(env);
-  // The kill-switch warning is emitted through the plugin's log contract on
-  // the first invocation (the resolver runs before any log sink exists), once
-  // per process.
-  let apiWarningShown = false;
-  // One effective routing URL for every consumer (catalog, model api.url, paste
-  // validation, auto-pick): user-set provider.lunaroute.options.baseURL wins over
-  // the env URL — spec "Base URL precedence". Updated by the config hook after
-  // stub injection reads it back; consumers outside the hook read this variable.
-  let effectiveRoutingUrl = envRoutingUrl;
-  const mcpUrl = resolveMcpUrl(env);
-  const webToolsStoreKey = deps.storeKey ?? resolveAuthStorePath(env, home);
-  // Production logging: PluginInput carries no logger, so without injection
-  // the only visible sink is client.app.log (POST /log → instance log) —
-  // resolved per invocation below (the client arrives with `input`). The
-  // reconciler is built once per process but logs per invocation, so it logs
-  // through this ref.
-  const noopLog: PluginLog = () => {};
-  const logRef = { current: deps.log ?? noopLog };
-  // Invalid-settings warnings are deduped per process by reason: the same
-  // malformed file is re-read by every consumer (config hook, web-tools gate,
-  // per-execute provider resolution) — warn once per distinct reason, not per
-  // read (a changed failure mode re-warns).
-  let lastSettingsWarnReason: string | undefined;
-  const onInvalidSettings = (reason: string): void => {
-    if (reason === lastSettingsWarnReason) return;
-    lastSettingsWarnReason = reason;
-    logRef.current("warn", `LunaRoute: ${reason}`);
-  };
-  const reconciler = createMcpReconciler(mcpUrl, (level, message) => logRef.current(level, message), sessionId);
-  const catalogMemo = createCatalogMemo((url, key) => fetchCatalog(url, key, sessionId));
-  let firstRunHintShown = false;
-
-  return async (input) => {
-    const clientOf = (runtime?: PluginRuntime): TestClient | undefined =>
-      runtime?.client ?? deps.client ?? input?.client;
-
-    /** Production log sink via the SDK client; absent client/app → undefined
-     * (the caller falls back to the noop). Never throws, never awaited. */
-    const clientLogOf = (client: TestClient | undefined): PluginLog | undefined => {
-      const app = client?.app;
-      if (!app?.log) return undefined;
-      return (level, message) => {
-        try {
-          void app.log({ body: { service: "lunaroute", level, message } }).catch(() => {});
-        } catch {
-          // Logging must never break a hook.
-        }
-      };
+    // v1's client.app.log sink is gone in v2; console output is the fallback
+    // (verified against the server log during the port spike).
+    const log: PluginLog = (level, message) => {
+      if (level === "warn") console.warn(message);
+      else console.log(message);
     };
-    const log: PluginLog = deps.log ?? clientLogOf(input?.client) ?? noopLog;
-    logRef.current = log;
-    if (envApiWarning && !apiWarningShown) {
-      apiWarningShown = true;
-      log("warn", envApiWarning);
-    }
+    if (wire.warning) log("warn", wire.warning);
 
-    /** Resolve the current default model from either SDK get() shape (wrapped or flat). */
-    const currentModelOf = (cfg: { data?: { model?: string }; model?: string } | undefined | null): string | undefined =>
-      cfg?.data?.model ?? cfg?.model;
-
-    /** User-configured provider baseURL from either SDK get() shape — the same shape tolerance as currentModelOf. */
-    const providerBaseUrlOf = (provider: unknown): string | undefined => {
-      const base = (provider as { lunaroute?: { options?: { baseURL?: unknown } } } | null | undefined)?.lunaroute?.options?.baseURL;
-      return typeof base === "string" && base ? base : undefined;
+    let lastSettingsWarnReason: string | undefined;
+    const onInvalidSettings = (reason: string): void => {
+      if (reason === lastSettingsWarnReason) return;
+      lastSettingsWarnReason = reason;
+      log("warn", `LunaRoute: ${reason}`);
     };
-    const effectiveBaseUrlOf = (
-      cfg: { data?: { provider?: unknown }; provider?: unknown } | undefined | null,
-    ): string | undefined => providerBaseUrlOf(cfg?.data?.provider) ?? providerBaseUrlOf(cfg?.provider);
+    const settingsNow = () => readSettings(env, home, undefined, onInvalidSettings);
 
-    /**
-     * Post-login default-model pick. The ONLY config write the plugin ever
-     * makes: exactly `{ model }` (never mcp, never keys) — config.update
-     * deep-merges and persists to the instance config.json (spike-verified).
-     * The update marks the instance for disposal; on reload the config hook
-     * re-runs (spike gate (a)) and re-injects models + MCP with the fresh key.
-     */
-    const postLoginRefresh = async (key: string, runtime?: PluginRuntime): Promise<void> => {
-      try {
-        const client = clientOf(runtime);
-        if (!client) return;
-        const fetched = await client.config.get();
-        const current = currentModelOf(fetched);
-        if (current) return;
-        const catalog = await catalogMemo(effectiveBaseUrlOf(fetched) ?? effectiveRoutingUrl, key);
-        if ("error" in catalog) {
-          log("warn", `LunaRoute: post-login catalog fetch failed: ${catalog.error}`);
-          return;
-        }
-        if (!catalog.models.length) return;
-        const id = defaultModelId(catalog.models);
-        if (!id) return;
-        const fresh = currentModelOf(await client.config.get()); // re-read guard: a concurrent selection wins
-        if (fresh) return;
-        await client.config.update({ config: { model: `${LUNAROUTE_PROVIDER}/${id}` } });
-        // Visible default-model feedback (pi 9v71 parity, folded into f2aj):
-        // the pick is pointless if the user cannot see it happened.
-        log("info", `LunaRoute: set ${LUNAROUTE_PROVIDER}/${id} as the default model (change with /models)`);
-      } catch (err) {
-        log("warn", `LunaRoute: post-login default-model pick failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    const reader = createCredentialReader(ctx as unknown as ConnectionCtxLike);
+    const resolveAuth = async (): Promise<AuthResolution> => {
+      const key = await reader();
+      return key ? { state: "valid", key } : { state: "logged-out" };
     };
 
-    // First-class tools (kata gygp web + kata 5715 image + kata gv7t
-    // convert): gated per invocation on settings, a valid key, and the
-    // hosted server's tools/list — probed ONCE per instance and shared by
-    // all gates. Never registered when logged out; probe failures skip with
-    // a warn (the next invocation retries — nothing is memoized).
-    let webToolMap: Record<string, ToolDefinition> = {};
-    let imageToolMap: Record<string, ToolDefinition> = {};
-    let convertToolMap: Record<string, ToolDefinition> = {};
-    try {
-      const settings = readSettings(env, home, undefined, onInvalidSettings);
+    // --- Provider + catalog -------------------------------------------------
+    const provider = createLunarouteProvider({
+      routingUrl,
+      wirePackage: wire.package,
+      resolveKey: reader,
+      fetchCatalog: (url, key) => fetchCatalog(url, key, sessionId),
+      log,
+    });
+    await provider.register(ctx as unknown as ProviderCtxLike);
+
+    // Post-login default-model pick (v1's postLoginRefresh, without the config
+    // file write): set once when no default is selected, replayed by
+    // model.reload() after each catalog refresh.
+    let catalogModels: MappedModel[] = provider.getModels();
+    await ctx.model.transform((editor) => {
+      if (catalogModels.length === 0) return;
+      if (editor.default.get()) return;
+      const id = defaultModelId(catalogModels);
+      if (!id) return;
+      editor.default.set(LUNAROUTE_PROVIDER as never, id as never);
+      log("info", `LunaRoute: set ${LUNAROUTE_PROVIDER}/${id} as the default model (change with /models)`);
+    });
+
+    // --- Integration (login methods) ----------------------------------------
+    await createLunarouteIntegration({ env, log }).register(ctx as unknown as IntegrationCtxLike);
+
+    // --- Attribution headers (chat.headers replacement) ----------------------
+    await ctx.session.hook(
+      "model.request",
+      (event) => {
+        Object.assign(event.headers, buildAttributionHeaders(sessionId));
+      },
+      { providerID: LUNAROUTE_PROVIDER },
+    );
+
+    // --- Hosted MCP ----------------------------------------------------------
+    const mcp = createLunarouteMcp({
+      mcpUrl,
+      sessionId,
+      log,
+      enabled: () => mcpEnabled(settingsNow()),
+    });
+    await mcp.register(ctx as unknown as McpCtxLike, await reader());
+
+    // --- First-class tools (web / image / convert) ---------------------------
+    let toolDefs: Record<string, ToolInfoLike> = {};
+    const buildTools = async (): Promise<Record<string, ToolInfoLike>> => {
+      const resolution = await resolveAuth();
+      if (resolution.state !== "valid") return {};
+      const settings = settingsNow();
       const wantWeb = webToolsEnabled(env, settings);
       const wantImage = imageToolsEnabled(env, settings);
       const wantConvert = convertToolsEnabled(env, settings);
-      const resolution = await resolveAuthState(webToolsStoreKey, deps.fs);
-      if (resolution.state === "valid" && (wantWeb || wantImage || wantConvert)) {
-        const descriptors = await listServerToolDescriptors({ url: mcpUrl, key: resolution.key, sessionId });
-        const [web, image, convert] = await Promise.all([
-          wantWeb
-            ? buildWebToolMap({
-                env,
-                mcpUrl,
-                sessionId,
-                log,
-                resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
-                readSettingsNow: () => readSettings(env, home, undefined, onInvalidSettings),
-                descriptors,
-              })
-            : Promise.resolve({}),
-          wantImage
-            ? buildImageToolMap({
-                env,
-                home,
-                mcpUrl,
-                sessionId,
-                log,
-                resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
-                readSettingsNow: () => readSettings(env, home, undefined, onInvalidSettings),
-                descriptors,
-              })
-            : Promise.resolve({}),
-          wantConvert
-            ? buildConvertToolMap({
-                env,
-                home,
-                mcpUrl,
-                sessionId,
-                log,
-                resolveKey: () => resolveAuthState(webToolsStoreKey, deps.fs),
-                readSettingsNow: () => readSettings(env, home, undefined, onInvalidSettings),
-                descriptors,
-              })
-            : Promise.resolve({}),
-        ]);
-        webToolMap = web;
-        imageToolMap = image;
-        convertToolMap = convert;
+      if (!wantWeb && !wantImage && !wantConvert) return {};
+      let descriptors: { name: string; inputSchema?: unknown }[];
+      try {
+        descriptors = await listServerToolDescriptors({ url: mcpUrl, key: resolution.key, sessionId });
+      } catch (err) {
+        log(
+          "warn",
+          `LunaRoute: first-class tools not registered (tools/list failed: ${err instanceof Error ? err.message : String(err)})`,
+        );
+        return {};
       }
-    } catch (err) {
-      log("warn", `LunaRoute: first-class tools not registered (tools/list failed: ${err instanceof Error ? err.message : String(err)})`);
-    }
-
-    return {
-      config: async (cfg: Record<string, unknown>, runtime?: PluginRuntime) => {
-        // Contributor 1: provider stub — always lands, individually isolated.
-        try {
-          injectProviderStub(cfg, envRoutingUrl, envApiNpm);
-          // Read the effective URL back: user-set baseURL or the env fallback
-          // just injected — every later consumer in this hook uses this value.
-          const stub = (cfg.provider as Record<string, { options?: { baseURL?: unknown } }> | undefined)?.lunaroute;
-          if (typeof stub?.options?.baseURL === "string" && stub.options.baseURL) {
-            effectiveRoutingUrl = stub.options.baseURL;
-          }
-        } catch (err) {
-          log("warn", `LunaRoute: provider stub injection failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        // One auth resolution feeds contributors 2 (models) and 3 (MCP).
-        try {
-          const storeKey = runtime?.storeKey ?? resolveAuthStorePath(env, home);
-          const resolution = await resolveAuthState(storeKey, runtime?.fs);
-          try {
-            if (resolution.state === "valid") {
-              const result = await catalogMemo(effectiveRoutingUrl, resolution.key);
-              if ("error" in result) {
-                log("warn", `LunaRoute: catalog fetch failed: ${result.error}`);
-                // Never leave the stub with zero models: OpenCode drops zero-model
-                // providers from its provider state, which would hide LunaRoute from
-                // /connect and /models entirely (kata 3xsy). injectPlaceholderModel
-                // is a no-op when models already exist, so a retained catalog is safe.
-                injectPlaceholderModel(cfg, effectiveRoutingUrl, envApiNpm, UNAVAILABLE_MODELS_NAME);
-              } else {
-                for (const s of result.skipped) log("warn", `LunaRoute: skipped catalog entry "${s.id}": ${s.reason}`);
-                if (result.skipped.length && !result.models.length) {
-                  log("warn", `LunaRoute: catalog had ${result.skipped.length} invalid entries, all skipped`);
-                }
-                if (result.models.length > 0) {
-                  injectModels(cfg, result.models, effectiveRoutingUrl, envApiNpm);
-                } else {
-                  injectPlaceholderModel(cfg, effectiveRoutingUrl, envApiNpm, UNAVAILABLE_MODELS_NAME);
-                }
-              }
-            } else {
-              // logged-out / indeterminate: existing models stay untouched (fail-safe
-              // retention per the spec's availability policy). When there are none,
-              // inject the labeled login placeholder — OpenCode drops zero-model
-              // providers from its provider state, which would hide LunaRoute from
-              // /connect entirely (dpd0).
-              injectPlaceholderModel(cfg, effectiveRoutingUrl, envApiNpm);
-              if (resolution.state === "logged-out" && !firstRunHintShown) {
-                firstRunHintShown = true;
-                log("info", "Run /connect and choose LunaRoute to start using LunaRoute.");
-              }
-            }
-          } catch (err) {
-            log("warn", `LunaRoute: model injection failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-          try {
-            // Settings gate the MCP contributor (kata f2aj). Deliberately NOT
-            // an early return: the models contributor above and the
-            // factory-time web-tools gate below are untouched when MCP is off
-            // (pi bjy9 caught that early-return bug with a test — mirrored in
-            // our tests). The mcp.lunaroute entry is per-instance live config:
-            // after a reload (restart or any PATCH-triggered apply) the new
-            // instance simply never gets it.
-            const settings = readSettings(env, home, undefined, onInvalidSettings);
-            if (mcpEnabled(settings)) {
-              reconciler.reconcile(cfg, resolution, storeKey);
-            }
-          } catch (err) {
-            log("warn", `LunaRoute: MCP injection failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        } catch (err) {
-          log("warn", `LunaRoute: auth resolution failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      },
-      auth: createLunarouteAuth({
-        env,
-        log,
-        sessionId,
-        resolveRoutingUrl: () => effectiveRoutingUrl,
-        onLoginSuccess: (key) => {
-          void postLoginRefresh(key);
-        },
-      }),
-      "chat.headers": async (req, output) => {
-        if (req.provider?.info?.id === LUNAROUTE_PROVIDER) {
-          Object.assign(output.headers, buildAttributionHeaders(sessionId));
-        }
-      },
-      tool: { ...webToolMap, ...imageToolMap, ...convertToolMap },
-      dispose: async () => {},
+      const [web, image, convert] = await Promise.all([
+        wantWeb
+          ? buildWebToolMap({
+              env,
+              mcpUrl,
+              sessionId,
+              log,
+              resolveKey: resolveAuth,
+              readSettingsNow: settingsNow,
+              descriptors,
+            })
+          : Promise.resolve({}),
+        wantImage
+          ? buildImageToolMap({
+              env,
+              home,
+              mcpUrl,
+              sessionId,
+              log,
+              resolveKey: resolveAuth,
+              readSettingsNow: settingsNow,
+              descriptors,
+            })
+          : Promise.resolve({}),
+        wantConvert
+          ? buildConvertToolMap({
+              env,
+              home,
+              mcpUrl,
+              sessionId,
+              log,
+              resolveKey: resolveAuth,
+              readSettingsNow: settingsNow,
+              descriptors,
+            })
+          : Promise.resolve({}),
+      ]);
+      return { ...web, ...image, ...convert } as unknown as Record<string, ToolInfoLike>;
     };
-  };
-}
+    toolDefs = await buildTools();
+    await ctx.tool.transform((editor) => {
+      for (const [name, def] of Object.entries(toolDefs)) {
+        editor.add({
+          name,
+          description: def.description,
+          input: def.input,
+          execute: async (input: unknown, context: { signal: AbortSignal }) =>
+            toV2Result(await def.execute(input, context)),
+        } as never);
+      }
+    });
 
-// The plugin package's `Plugin`/`Hooks` types are richer than our structural
-// slice; the runtime shapes are compatible (spike-verified against a packed
-// tarball in a real OpenCode). One targeted cast, at the default export only —
-// never inside the modules.
-const lunaroutePlugin: Plugin = createLunaroutePlugin() as unknown as Plugin;
-export default lunaroutePlugin;
+    // --- Credential lifecycle: refresh catalog, MCP, tools, default model ----
+    const controller = new AbortController();
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        if (event.type !== "credential.updated" && event.type !== "credential.switched") continue;
+        const data = event.data as { integrationID?: string } | undefined;
+        if (data?.integrationID !== undefined && data.integrationID !== LUNAROUTE_PROVIDER) continue;
+        const key = await reader();
+        await provider.refresh(ctx as unknown as ProviderCtxLike);
+        catalogModels = provider.getModels();
+        await ctx.model.reload();
+        await mcp.refresh(ctx as unknown as McpCtxLike, key);
+        toolDefs = await buildTools();
+        await ctx.tool.reload();
+      }
+    })();
+
+    return () => controller.abort();
+  },
+});

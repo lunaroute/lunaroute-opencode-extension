@@ -1,28 +1,7 @@
 import { createServer, type Server } from "node:http";
-import { hostname } from "node:os";
-import type { AuthHook } from "@opencode-ai/plugin";
-import {
-  buildAttributionHeaders,
-  buildDeviceAuthUrl,
-  buildExchangeBody,
-  computePkceChallenge,
-  generatePkceVerifier,
-  generateState,
-  isValidCredentialShape,
-  parseCallbackQuery,
-  resolveApiUrl,
-  resolveFrontUrl,
-  resolveRoutingUrl,
-  type ExchangeRequest,
-  type ExchangeResponse,
-} from "./lunaroute.js";
+import { buildExchangeBody, parseCallbackQuery, type ExchangeRequest, type ExchangeResponse } from "./lunaroute.js";
 
-const LOGIN_TIMEOUT_MS = 3 * 60_000;
 
-/** The remote-browser method never listens on a loopback, but DeviceAuthPage
- * only enables approval for a plausible port (1024–65535) and uses it to
- * build the callback URL the user pastes back — so pass a fixed valid one. */
-const REMOTE_BROWSER_CALLBACK_PORT = 45117;
 
 export type LoopbackServer = {
   port: number;
@@ -94,207 +73,38 @@ export type LoginDeps = {
 };
 export type AuthLog = (level: "info" | "warn", message: string) => void;
 
-export type StoredAuth =
-  | { type: "api"; key: string }
-  | { type: "oauth"; access: string; refresh: string; expires: number }
-  | null;
-
-export function resolveStoredCredential(auth: unknown): string | undefined {
-  if (typeof auth !== "object" || auth === null) return undefined;
-  const a = auth as Record<string, unknown>;
-  const candidate = a.type === "api" ? a.key : a.type === "oauth" ? a.access : undefined;
-  return isValidCredentialShape(candidate) ? candidate : undefined;
-}
-
-export function createLunarouteAuth(opts: {
-  env: NodeJS.ProcessEnv;
-  onLoginSuccess?: (key: string) => void;
-  log?: AuthLog;
-  sessionId?: string;
-  /** Effective routing URL for paste-key validation — the plugin passes its
-   * user-baseURL-aware effective URL; defaults to the env-derived URL. */
-  resolveRoutingUrl?: () => string;
-  deps?: LoginDeps;
-}): AuthHook {
-  const log = opts.log ?? (() => {});
-  const d = {
-    startLoopback: startLoopbackServer,
-    exchange: exchangeCode,
-    state: generateState,
-    verifier: generatePkceVerifier,
-    fetch: fetch,
-    ...opts.deps,
-  };
-  const succeed = (key: string): { type: "success"; key: string } => {
-    opts.onLoginSuccess?.(key);
-    return { type: "success", key };
-  };
-  const fail = (): { type: "failed" } => {
-    log("warn", "LunaRoute login failed");
-    return { type: "failed" };
-  };
-  // Remote-browser callback: OpenCode prompts once and ends the flow on any
-  // {type:"failed"} (no re-prompt) — so every failure logs its exact reason to
-  // the instance log, making the forced /connect restart an informed one (dw0g).
-  const failRemote = (reason: string): { type: "failed" } => {
-    log("warn", `LunaRoute remote-browser login failed: ${reason}`);
-    return { type: "failed" };
-  };
-
-  return {
-    provider: "lunaroute",
-    loader: async (getAuth) => {
-      const key = resolveStoredCredential(await getAuth());
-      return key ? { apiKey: key } : {};
-    },
-    methods: [
-      {
-        type: "oauth",
-        label: "Log in with browser",
-        authorize: async () => {
-          const verifier = d.verifier();
-          const challenge = computePkceChallenge(verifier);
-          const state = d.state();
-          const server = await d.startLoopback();
-          const url = buildDeviceAuthUrl(resolveFrontUrl(opts.env), server.port, state, challenge);
-          return {
-            url,
-            instructions: "Complete login in your browser.",
-            method: "auto" as const,
-            callback: async (): Promise<{ type: "success"; key: string } | { type: "failed" }> => {
-              let timer: ReturnType<typeof setTimeout> | undefined;
-              const timeout = new Promise<never>((_, reject) => {
-                timer = setTimeout(
-                  () => reject(new Error("timed out waiting for browser authorization")),
-                  LOGIN_TIMEOUT_MS,
-                );
-              });
-              try {
-                const cb = await Promise.race([server.waitForCallback(), timeout]);
-                if (cb.state !== state) {
-                  log("warn", "LunaRoute browser login failed: state mismatch");
-                  return fail();
-                }
-                const result = await d.exchange(resolveApiUrl(opts.env), {
-                  code: cb.code,
-                  verifier,
-                  label: hostname(),
-                });
-                return succeed(result.full_key);
-              } catch (err) {
-                if (err instanceof Error && err.message.includes("timed out")) {
-                  log("info", "If your browser is on a different machine, re-run and choose 'Log in from a remote browser'.");
-                }
-                log(
-                  "warn",
-                  `LunaRoute browser login error: ${err instanceof Error ? err.message : String(err)}`,
-                );
-                return fail();
-              } finally {
-                if (timer) clearTimeout(timer);
-                server.close();
-              }
-            },
-          };
-        },
-      },
-      {
-        type: "oauth",
-        label: "Log in from a remote browser",
-        authorize: async () => {
-          // Same PKCE machinery as the browser method, but no loopback server:
-          // the browser is on another machine, so nothing on this host listens.
-          const verifier = d.verifier();
-          const challenge = computePkceChallenge(verifier);
-          const state = d.state();
-          const url = buildDeviceAuthUrl(
-            resolveFrontUrl(opts.env),
-            REMOTE_BROWSER_CALLBACK_PORT,
-            state,
-            challenge,
-          );
-          return {
-            url,
-            instructions:
-              "Open the URL in any browser and approve, then paste back what the approval page gives you — its curl command, the callback URL, its ?code=...&state=... part, or a bare code all work. A failed paste ends the flow: re-run /connect for a fresh code.",
-            method: "code" as const,
-            callback: async (pasted: string): Promise<{ type: "success"; key: string } | { type: "failed" }> => {
-              try {
-                const trimmed = pasted.trim();
-                if (!trimmed) return failRemote("nothing pasted");
-                // Extraction ladder (kata dw0g): the approval page's only copy
-                // artifact today is a curl command wrapping the callback URL;
-                // a paste may also be the bare URL, a code=...&state=... query,
-                // or (once the approval page ships it) a bare code.
-                const urlMatch = trimmed.match(/https?:\/\/[^\s'"]+/i);
-                let normalized: string;
-                if (urlMatch) {
-                  normalized = urlMatch[0];
-                } else if (/(?:^|[&?])(?:code|state)=/i.test(trimmed)) {
-                  // Accept a bare "code=..&state=.." query string (optional leading ?).
-                  normalized = `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
-                } else if (/^[A-Za-z0-9._~-]{1,256}={0,2}$/.test(trimmed)) {
-                  // A bare authorization code: a single URL-safe token, Base64
-                  // trailing padding allowed (roborev job 1850: `abc=` must not
-                  // be mistaken for a query string). State is not comparable
-                  // without the URL — the gateway's single-use + short-TTL code
-                  // validation is the binding.
-                  normalized = `http://127.0.0.1/callback?code=${encodeURIComponent(trimmed)}`;
-                } else {
-                  return failRemote("no code found in paste");
-                }
-                const cb = parseCallbackQuery(normalized);
-                if (!cb.code) return failRemote("no code found in paste");
-                // The state binds the paste to this attempt — enforce it only
-                // when the paste carries one (bare-code contract above).
-                if (new URL(normalized).searchParams.has("state") && cb.state !== state) {
-                  return failRemote("state mismatch");
-                }
-                const result = await d.exchange(resolveApiUrl(opts.env), {
-                  code: cb.code,
-                  verifier,
-                  label: hostname(),
-                });
-                return succeed(result.full_key);
-              } catch (err) {
-                // The one-shot flow can't re-prompt, so the exact reason is the
-                // only thing the user gets before a forced /connect restart.
-                return failRemote(`exchange failed: ${err instanceof Error ? err.message : String(err)}`);
-              }
-            },
-          };
-        },
-      },
-      {
-        type: "api",
-        label: "Paste an API key",
-        prompts: [
-          {
-            type: "text",
-            key: "api_key",
-            message: "Paste your LunaRoute API key (lr_...)",
-            placeholder: "lr_...",
-            validate: (value: string) =>
-              isValidCredentialShape(value) ? undefined : "Key must be printable ASCII, up to 512 characters",
-          },
-        ],
-        authorize: async (inputs?: Record<string, string>) => {
-          const key = inputs?.api_key;
-          if (!isValidCredentialShape(key)) return fail();
-          try {
-            const routingUrl = opts.resolveRoutingUrl?.() ?? resolveRoutingUrl(opts.env);
-            const res = await d.fetch(`${routingUrl}/models`, {
-              headers: {
-                Authorization: `Bearer ${key}`,
-                ...(opts.sessionId ? buildAttributionHeaders(opts.sessionId) : {}),
-              },
-            });
-            return res.ok ? succeed(key) : fail();
-          } catch {
-            return fail();
-          }
-        },
-      },
-    ],
-  };
+/**
+ * Remote-browser paste ladder (kata dw0g), pure. The approval page's only
+ * copy artifact today is a curl command wrapping the callback URL; a paste
+ * may also be the bare URL, a code=...&state=... query, or a bare code.
+ * State is compared only when the paste carries one — the gateway's
+ * single-use + short-TTL code validation is the binding for bare codes.
+ */
+export function extractPastedLogin(
+  pasted: string,
+  expectedState: string,
+): { ok: true; code: string } | { ok: false; reason: string } {
+  const trimmed = pasted.trim();
+  if (!trimmed) return { ok: false, reason: "nothing pasted" };
+  const urlMatch = trimmed.match(/https?:\/\/[^\s'"]+/i);
+  let normalized: string;
+  if (urlMatch) {
+    normalized = urlMatch[0];
+  } else if (/(?:^|[&?])(?:code|state)=/i.test(trimmed)) {
+    // Accept a bare "code=..&state=.." query string (optional leading ?).
+    normalized = `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
+  } else if (/^[A-Za-z0-9._~-]{1,256}={0,2}$/.test(trimmed)) {
+    // A bare authorization code: a single URL-safe token, Base64 trailing
+    // padding allowed (roborev job 1850: `abc=` must not be mistaken for a
+    // query string).
+    normalized = `http://127.0.0.1/callback?code=${encodeURIComponent(trimmed)}`;
+  } else {
+    return { ok: false, reason: "no code found in paste" };
+  }
+  const cb = parseCallbackQuery(normalized);
+  if (!cb.code) return { ok: false, reason: "no code found in paste" };
+  if (new URL(normalized).searchParams.has("state") && cb.state !== expectedState) {
+    return { ok: false, reason: "state mismatch" };
+  }
+  return { ok: true, code: cb.code };
 }

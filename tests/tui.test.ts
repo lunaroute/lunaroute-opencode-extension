@@ -1,55 +1,119 @@
-import { describe, it, expect } from "vitest";
-import type { TuiPluginApi, TuiPluginMeta } from "@opencode-ai/plugin/tui";
-import tuiModule from "../src/tui.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import tui from "../src/tui.js";
+import { readSettings } from "../src/settings.js";
 
-/** Minimal TuiPluginApi: capture registered commands and the props the command
- * renders into the dialog stack. Nothing here touches the real filesystem —
- * the command's open() only reads settings (ENOENT → defaults under the temp
- * XDG_DATA_HOME set below). */
-const fakeApi = () => {
-  const commands: { title: string; value: string; slash: { name: string }; onSelect?: () => void }[] = [];
-  let rendered: { title: string; options: { value: string; description?: string }[] } | undefined;
-  const api = {
-    command: {
-      register: (cb: () => typeof commands) => {
-        commands.push(...cb());
-        return () => {};
+type DialogOptions = { options: { value: string }[] };
+type Toast = { variant?: string; message: string };
+type Command = { id: string; slash: { name: string }; run: () => Promise<void> };
+
+function fakeContext(responder: (opts: DialogOptions) => string | undefined) {
+  const commands: Command[] = [];
+  const selects: DialogOptions[] = [];
+  const toasts: Toast[] = [];
+  const reload = vi.fn(async () => {});
+  const context = {
+    keymap: {
+      layer: (factory: () => { commands: Command[] }) => {
+        commands.push(...factory().commands);
       },
     },
     ui: {
-      DialogSelect: (props: typeof rendered) => props,
       dialog: {
-        replace: (render: () => typeof rendered) => {
-          rendered = render();
+        select: async (opts: DialogOptions) => {
+          selects.push(opts);
+          return responder(opts);
         },
       },
-      toast: () => {},
+      toast: { show: (toast: Toast) => toasts.push(toast) },
     },
-    client: { config: { get: async () => ({ data: { model: "m" } }), update: async () => ({}) } },
+    client: {
+      location: { reload },
+      model: {
+        list: async () => ({
+          data: [{ providerID: "lunaroute" }, { providerID: "opencode" }, { providerID: "lunaroute" }],
+        }),
+      },
+    },
   };
-  return { api: api as unknown as TuiPluginApi, commands, rendered: () => rendered };
-};
+  return { context, commands, selects, toasts, reload };
+}
 
-describe("/lunaroute TUI plugin module (kata 7pd6)", () => {
-  it("default export is the { id, tui } object form the loader requires", () => {
-    expect(tuiModule.id).toBe("lunaroute-tui");
-    expect(typeof tuiModule.tui).toBe("function");
-    expect("server" in tuiModule).toBe(false);
+describe("/lunaroute v2 TUI plugin", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "lunaroute-tui-"));
+    mkdirSync(join(dir, "opencode"), { recursive: true });
+    vi.stubEnv("XDG_DATA_HOME", dir);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
-  it("registers a /lunaroute slash command that opens the settings list", async () => {
-    process.env.XDG_DATA_HOME = "/nonexistent-lunaroute-test";
-    const { api, commands, rendered } = fakeApi();
-    await tuiModule.tui(api, undefined, {} as TuiPluginMeta);
+  it("registers a /lunaroute slash command", async () => {
+    const { context, commands } = fakeContext(() => undefined);
+    await tui.setup(context as never);
 
     expect(commands).toHaveLength(1);
-    const [command] = commands;
-    expect(command!.slash.name).toBe("lunaroute");
-    expect(command!.value).toBe("lunaroute.settings");
+    expect(commands[0].slash.name).toBe("lunaroute");
+  });
 
-    command!.onSelect!();
-    const props = rendered()!;
-    expect(props.title).toBe("LunaRoute settings");
-    expect(props.options.map((o) => o.value)).toEqual(["mcp", "webTools", "searchProvider", "imageTools", "convertTools"]);
+  it("offers the five settings rows plus Refresh models", async () => {
+    const { context, commands, selects } = fakeContext(() => undefined);
+    await tui.setup(context as never);
+    await commands[0].run();
+
+    expect(selects[0].options.map((o) => o.value)).toEqual([
+      "mcp",
+      "webTools",
+      "searchProvider",
+      "imageTools",
+      "convertTools",
+      "__refresh",
+    ]);
+  });
+
+  it("toggle: writes the settings file first, then reloads and toasts", async () => {
+    const { context, commands, toasts, reload } = fakeContext(() => "mcp");
+    await tui.setup(context as never);
+    await commands[0].run();
+
+    expect(readSettings(process.env, "").mcp).toBe("off");
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(toasts.at(-1)).toMatchObject({ variant: "success" });
+    expect(String(toasts.at(-1)?.message)).toContain("mcp = off");
+  });
+
+  it("write failure: error toast and no reload", async () => {
+    const file = join(dir, "not-a-directory");
+    writeFileSync(file, "");
+    vi.stubEnv("XDG_DATA_HOME", file);
+
+    const { context, commands, toasts, reload } = fakeContext(() => "mcp");
+    await tui.setup(context as never);
+    await commands[0].run();
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(toasts.at(-1)).toMatchObject({ variant: "error" });
+  });
+
+  it("refresh: reloads and reports the catalog size", async () => {
+    const { context, commands, toasts, reload } = fakeContext(() => "__refresh");
+    await tui.setup(context as never);
+    await commands[0].run();
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(String(toasts.at(-1)?.message)).toBe("Models reloaded — 2 available");
+  });
+
+  it("cancelled selection does nothing", async () => {
+    const { context, commands, toasts, reload } = fakeContext(() => undefined);
+    await tui.setup(context as never);
+    await commands[0].run();
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(toasts).toEqual([]);
   });
 });

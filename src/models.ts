@@ -1,9 +1,11 @@
-import { buildAttributionHeaders, LUNAROUTE_PROVIDER, mapCatalog, type MappedModel, type WireNpm } from "./lunaroute.js";
-
-export type ConfigLike = Record<string, unknown>;
+import { buildAttributionHeaders, mapCatalog, type MappedModel } from "./lunaroute.js";
 
 export type CatalogResult = { models: MappedModel[]; skipped: { id: string; reason: string }[] } | { error: string };
 
+/** Fetch + map the gateway catalog. The v2 provider transform replays
+ * captured state, so no cross-invocation memo is needed (v1's config hook ran
+ * several times per process; the v2 setup/credential-event paths fetch when
+ * there is a reason to). */
 export async function fetchCatalog(
   routingUrl: string,
   key: string,
@@ -18,153 +20,11 @@ export async function fetchCatalog(
     });
     if (!res.ok) return { error: `HTTP ${res.status}` };
     const body = await res.json();
-    if (typeof body !== "object" || body === null || !Array.isArray((body as { data?: unknown }).data)) return { error: "malformed catalog body" };
+    if (typeof body !== "object" || body === null || !Array.isArray((body as { data?: unknown }).data)) {
+      return { error: "malformed catalog body" };
+    }
     return mapCatalog((body as { data: unknown[] }).data);
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
-}
-
-export type ProviderModel = Record<string, unknown>;
-
-/** Sole pin predicate, read by the stub: the provider's npm is the value
- * opencode routes every model on, so a pin must resolve identically wherever
- * it is read. A non-string or whitespace-only value counts as absent; a
- * present string is trimmed (matching the resolver's env trimming, since
- * opencode passes provider.npm verbatim to its package loader) and the
- * remainder is trusted verbatim. A pin is an arbitrary npm id; WireNpm
- * narrows only the values the resolver produces. */
-const pickNpm = (v: unknown, fallback: WireNpm): string =>
-  typeof v === "string" && v.trim() ? v.trim() : fallback;
-
-export function toProviderModels(
-  models: MappedModel[],
-  baseUrl: string,
-  npm: string,
-): Record<string, ProviderModel> {
-  const out: Record<string, ProviderModel> = {};
-  for (const m of models) {
-    out[m.id] = {
-      id: m.id,
-      name: m.name,
-      providerID: LUNAROUTE_PROVIDER,
-      family: m.id.split("/").pop()?.split("-")[0] ?? m.id,
-      release_date: "",
-      attachment: m.attachment,
-      reasoning: m.reasoning,
-      temperature: true,
-      tool_call: m.tool_call,
-      modalities: { input: m.modalitiesInput, output: ["text"] },
-      api: { id: m.id, url: baseUrl, npm },
-      capabilities: {
-        temperature: true, reasoning: m.reasoning, attachment: m.attachment, toolcall: m.tool_call,
-        input: { text: true, image: m.attachment, audio: false, video: false, pdf: false },
-        output: { text: true, image: false, audio: false, video: false, pdf: false },
-        interleaved: false,
-      },
-      cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-      limit: { context: m.limitContext, output: m.limitOutput },
-      options: {},
-      headers: {},
-      status: "active",
-      variants: m.variants,
-    };
-  }
-  return out;
-}
-
-export function injectProviderStub(cfg: ConfigLike, routingUrl: string, npm: WireNpm): void {
-  const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
-  cfg.provider = providers;
-  const existing = providers[LUNAROUTE_PROVIDER];
-  const existingOptions = (existing?.options ?? {}) as Record<string, unknown>;
-  providers[LUNAROUTE_PROVIDER] = {
-    ...existing,
-    name: existing?.name ?? "LunaRoute",
-    // A user-pinned npm wins over the resolved default.
-    npm: pickNpm(existing?.npm, npm),
-    options: { ...existingOptions, baseURL: existingOptions.baseURL ?? routingUrl },
-  };
-}
-
-/** Catalog is the source of truth when logged in: fetched models replace provider.lunaroute.models. */
-export function injectModels(cfg: ConfigLike, models: MappedModel[], baseUrl: string, npm: WireNpm): void {
-  const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
-  cfg.provider = providers;
-  const provider = providers[LUNAROUTE_PROVIDER] ?? {};
-  // opencode derives every model's routing npm from provider.npm
-  // (packages/opencode/src/provider/provider.ts, 1.18.31), so the per-model
-  // api.npm written here is shape parity, not a routing input. It mirrors the
-  // pinned provider.npm (set by injectProviderStub) so the config is
-  // internally consistent instead of carrying the env-resolved default.
-  provider.models = toProviderModels(models, baseUrl, pickNpm(provider.npm, npm));
-  providers[LUNAROUTE_PROVIDER] = provider;
-}
-
-export const PLACEHOLDER_MODEL_ID = "login";
-
-/** Pre-login placeholder: OpenCode drops zero-model providers from its provider
- * state, which hides a config-only provider from /connect entirely (dpd0). The
- * name parameter lets callers distinguish "not logged in yet" from "logged in
- * but the catalog could not be loaded" (kata 3xsy: a valid key plus a failed
- * or empty catalog must not silently hide the provider).
- * single labeled placeholder keeps the provider connectable and tells the user
- * what to do. Additive-only: existing models (user-written or catalog) always
- * win; the post-login catalog replaces the placeholder wholesale. */
-export function injectPlaceholderModel(cfg: ConfigLike, baseUrl: string, npm: WireNpm, name = "Log in to load models"): boolean {
-  const providers = (cfg.provider ?? {}) as Record<string, Record<string, unknown>>;
-  cfg.provider = providers;
-  const provider = providers[LUNAROUTE_PROVIDER] ?? {};
-  const existing = (provider.models ?? {}) as Record<string, unknown>;
-  if (Object.keys(existing).length > 0) return false;
-  // Mirrors injectModels: the placeholder's api.npm carries the pinned
-  // provider.npm (set by injectProviderStub) for internal consistency.
-  provider.models = toProviderModels(
-    [
-      {
-        id: PLACEHOLDER_MODEL_ID,
-        name,
-        reasoning: false,
-        tool_call: true,
-        attachment: false,
-        limitContext: 128000,
-        limitOutput: 8192,
-        modalitiesInput: ["text"],
-        variants: {},
-      },
-    ],
-    baseUrl,
-    pickNpm(provider.npm, npm),
-  );
-  providers[LUNAROUTE_PROVIDER] = provider;
-  return true;
-}
-
-/** Per-process per-(URL, credential) memo: concurrent callers share one in-flight fetch;
- * a SUCCESSFUL result is reused for later same-key calls (config hook runs multiple
- * times per process); a FAILED result is never cached — the next call retries.
- * The URL is part of the key so a user changing provider.lunaroute.options.baseURL
- * between hook runs gets a fresh catalog, not the other endpoint's. */
-export function createCatalogMemo(
-  fetchFor: (url: string, key: string) => Promise<CatalogResult>,
-): (url: string, key: string) => Promise<CatalogResult> {
-  const cache = new Map<string, Promise<CatalogResult>>();
-  return (url: string, key: string) => {
-    const k = `${url}\n${key}`;
-    let entry = cache.get(k);
-    if (!entry) {
-      entry = fetchFor(url, key).then(
-        (result) => {
-          if ("error" in result) cache.delete(k); // failure: do not cache
-          return result;
-        },
-        (err) => {
-          cache.delete(k);
-          throw err;
-        },
-      );
-      cache.set(k, entry);
-    }
-    return entry;
-  };
 }

@@ -1,6 +1,6 @@
 {
   "name": "@lunaroute/opencode-extension",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "OpenCode plugin for LunaRoute: /connect login, model sync, attribution, and hosted MCP.",
   "type": "module",
   "main": "./src/index.ts",
@@ -31,16 +31,16 @@
     "test": "vitest run",
     "check": "npm run typecheck && npm test"
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": "^1.17.20"
+  "dependencies": {
+    "@opencode/plugin": "2.0.29",
+    "zod": "4.1.8"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.17.20",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
     "vitest": "^4.1.0"
   },
   "engines": {
-    "opencode": ">=1.14.49"
+    "opencode": ">=2.0.0"
   }
 }

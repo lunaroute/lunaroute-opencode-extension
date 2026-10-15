@@ -167,20 +167,6 @@ export function applySettingChange(settings: LunarouteSettings, key: SettingsKey
   }
 }
 
-/** Write-first applier: persist the file, THEN trigger the instance reload.
- * A write failure throws before any PATCH — the file is the source of truth,
- * so a change that was not persisted must never look applied. */
-export async function saveSettingsAndApply(
-  env: NodeJS.ProcessEnv,
-  home: string,
-  client: SettingsApplyClient,
-  settings: LunarouteSettings,
-  io: SettingsIo = defaultIo,
-): Promise<SettingsApplyOutcome> {
-  writeSettings(env, home, settings, io);
-  return applySettingsViaReload(client);
-}
-
 // ============================================================================
 // Decisions (pure)
 // ============================================================================
@@ -217,35 +203,4 @@ export function mcpEnabled(settings: LunarouteSettings): boolean {
 /** Provider to pass to the MCP web_search tool; undefined = server default. */
 export function resolveSearchProvider(settings: LunarouteSettings): ConcreteSearchProvider | undefined {
   return settings.searchProvider === "server" ? undefined : settings.searchProvider;
-}
-
-// ============================================================================
-// Live apply (spike-verified — docs/settings-live-apply-spike.md)
-// ============================================================================
-
-/** Structural slice of the OpenCode SDK client needed to trigger a reload. */
-export type SettingsApplyClient = {
-  config: {
-    get(): Promise<{ data?: { model?: string }; model?: string }>;
-    update(body: { config: { model: string } }): Promise<unknown>;
-  };
-};
-
-export type SettingsApplyOutcome = "patched" | "skipped-no-model";
-
-/** Trigger the instance reload that makes registration-time gates (web tools,
- * MCP) re-evaluate against the fresh settings file: a config PATCH marks the
- * instance for disposal, and the next instance use re-runs the plugin factory
- * + config hook (spike A/B/A-verified — the tool map rebuilds per instance).
- * The PATCH re-writes the CURRENT default model — idempotent, never changes
- * user state. With no default model set there is nothing idempotent to write,
- * so this skips (the reload then happens on the next natural instance);
- * callers wanting a forced reload in that case must supply their own patch
- * body. Throws on client failure — callers handle. */
-export async function applySettingsViaReload(client: SettingsApplyClient): Promise<SettingsApplyOutcome> {
-  const fetched = await client.config.get();
-  const model = fetched?.data?.model ?? fetched?.model;
-  if (!model) return "skipped-no-model";
-  await client.config.update({ config: { model } });
-  return "patched";
 }

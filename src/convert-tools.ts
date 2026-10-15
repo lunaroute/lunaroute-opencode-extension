@@ -1,4 +1,4 @@
-import { tool, type ToolDefinition, type ToolResult } from "@opencode-ai/plugin";
+import { tool, type ToolDefinition, type ToolResult } from "./tool-api.js";
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import type { AuthResolution } from "./mcp.js";

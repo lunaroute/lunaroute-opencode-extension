@@ -1,380 +1,137 @@
-import { describe, it, expect } from "vitest";
-import { createMcpReconciler, isManagedShape, resolveAuthState, resolveAuthStorePath } from "../src/mcp.js";
-import { credentialFingerprint } from "../src/lunaroute.js";
+import { describe, it, expect, vi } from "vitest";
+import {
+  buildMcpServer,
+  createLunarouteMcp,
+  normalizedUrlIdentity,
+  type McpCtxLike,
+  type McpEditorLike,
+  type McpServerLike,
+} from "../src/mcp.js";
 
-const MCP_URL = "https://mcp.lunaroute.com/mcp";
-const KEY_A = "lr_aaaaaaaaaa";
-const KEY_B = "lr_bbbbbbbbbb";
+type Entry = readonly [string, { url?: unknown }];
 
-function memFS(files: Record<string, string | Error>): { readFile: (p: string) => Promise<string> } {
-  return {
-    readFile: async (p) => {
-      const v = files[p];
-      if (v instanceof Error) throw v;
-      if (v === undefined) {
-        const e = new Error("ENOENT") as NodeJS.ErrnoException;
-        e.code = "ENOENT";
-        throw e;
-      }
-      return v;
+function makeCtx(entries: Entry[] = []) {
+  const setCalls: { name: string; config: McpServerLike }[] = [];
+  const callbacks: ((editor: McpEditorLike) => void)[] = [];
+  const editor: McpEditorLike = {
+    list: () => entries,
+    get: (name) => entries.find(([n]) => n === name)?.[1],
+    set: (name, config) => setCalls.push({ name, config }),
+  };
+  // reload() replays the registered transforms, like the real registry.
+  const reload = vi.fn(async () => {
+    for (const cb of callbacks) cb(editor);
+  });
+  const ctx: McpCtxLike = {
+    mcp: {
+      transform: async (cb) => {
+        callbacks.push(cb);
+        cb(editor);
+        return {};
+      },
+      reload,
     },
   };
+  return { ctx, setCalls, reload };
 }
-const store = (entry: unknown) => JSON.stringify({ lunaroute: entry });
-const managedEntry = (key: string): Record<string, unknown> => ({
-  type: "remote",
-  url: MCP_URL,
-  oauth: false,
-  enabled: true,
-  headers: { "LUNAROUTE-API-KEY": key, "lunaroute-agent": "opencode", "x-lunaroute-session": "s", "lunaroute-session-id": "s" },
-});
-const cfgWith = (entry: unknown) => ({ mcp: { lunaroute: entry } }) as Record<string, unknown>;
 
-describe("auth resolver (tri-state)", () => {
-  const p = "/store/auth.json";
-  it("valid: readable + shaped credential (api and oauth shapes)", async () => {
-    expect(await resolveAuthState(p, memFS({ [p]: store({ type: "api", key: KEY_A }) }))).toEqual({ state: "valid", key: KEY_A });
-    expect(await resolveAuthState(p, memFS({ [p]: store({ type: "oauth", access: KEY_A, refresh: "", expires: 1 }) }))).toEqual({ state: "valid", key: KEY_A });
-  });
-  it("logged-out: readable store, entry absent", async () => {
-    expect(await resolveAuthState(p, memFS({ [p]: JSON.stringify({}) }))).toEqual({ state: "logged-out" });
-    expect(await resolveAuthState(p, memFS({ [p]: JSON.stringify({ other: { type: "api", key: "x" } }) }))).toEqual({ state: "logged-out" });
-  });
-  it("indeterminate: missing, unparseable, unreadable, non-object store", async () => {
-    expect(await resolveAuthState(p, memFS({}))).toMatchObject({ state: "indeterminate" });
-    expect(await resolveAuthState(p, memFS({ [p]: "{nope" }))).toMatchObject({ state: "indeterminate" });
-    expect(await resolveAuthState(p, memFS({ [p]: "[1]" }))).toMatchObject({ state: "indeterminate" });
-    expect(await resolveAuthState(p, memFS({ [p]: new Error("EACCES") }))).toMatchObject({ state: "indeterminate" });
-  });
-  it("indeterminate: present-but-invalid record shapes", async () => {
-    for (const bad of [null, [], 5, {}, { type: "api" }, { type: "api", key: "" }, { type: "api", key: "bad\n" }, { type: "oauth" }]) {
-      expect(await resolveAuthState(p, memFS({ [p]: store(bad) }))).toMatchObject({ state: "indeterminate" });
-    }
-  });
-  it("store path: XDG override and default", () => {
-    expect(resolveAuthStorePath({ XDG_DATA_HOME: "/xdg" }, "/home/u")).toBe("/xdg/opencode/auth.json");
-    expect(resolveAuthStorePath({}, "/home/u")).toBe("/home/u/.local/share/opencode/auth.json");
-  });
+const opts = (over: Partial<Parameters<typeof createLunarouteMcp>[0]> = {}) => ({
+  mcpUrl: "https://mcp.example/mcp",
+  sessionId: "sess-1",
+  log: vi.fn(),
+  ...over,
 });
 
-describe("value-shape recognition (accept)", () => {
-  it("matches our exact shape, ignoring the key value", () => {
-    expect(isManagedShape(managedEntry(KEY_A), MCP_URL)).toBe(true);
-    expect(isManagedShape(managedEntry(KEY_B), MCP_URL)).toBe(true);
-  });
-  it("case-insensitive header names normalize to ours", () => {
-    const caseVaried = managedEntry(KEY_A);
-    caseVaried.headers = { "lunaroute-api-key": KEY_A, "LUNAROUTE-AGENT": "opencode", "x-lunaroute-session": "s", "lunaroute-session-id": "s" };
-    expect(isManagedShape(caseVaried, MCP_URL)).toBe(true);
-  });
-  it("extra top-level fields are tolerated (host normalization)", () => {
-    expect(isManagedShape({ ...managedEntry(KEY_A), extra: 1 }, MCP_URL)).toBe(true);
-  });
-});
+describe("createLunarouteMcp", () => {
+  it("registers the hosted server with key + attribution headers", async () => {
+    const { ctx, setCalls } = makeCtx();
+    await createLunarouteMcp(opts()).register(ctx, "lr_key");
 
-describe("value-shape recognition (reject)", () => {
-  it("wrong type", () => {
-    expect(isManagedShape({ type: "local", command: [] }, MCP_URL)).toBe(false);
-  });
-  it("different url", () => {
-    expect(isManagedShape({ ...managedEntry(KEY_A), url: "https://elsewhere" }, MCP_URL)).toBe(false);
-  });
-  it("oauth true", () => {
-    expect(isManagedShape({ ...managedEntry(KEY_A), oauth: true }, MCP_URL)).toBe(false);
-  });
-  it("enabled false", () => {
-    expect(isManagedShape({ ...managedEntry(KEY_A), enabled: false }, MCP_URL)).toBe(false);
-  });
-  it("missing header (header-name set differs)", () => {
-    const e = managedEntry(KEY_A);
-    delete (e.headers as Record<string, unknown>)["lunaroute-agent"];
-    expect(isManagedShape(e, MCP_URL)).toBe(false);
-  });
-  it("extra header (header-name set differs)", () => {
-    const e: Record<string, unknown> = managedEntry(KEY_A);
-    (e.headers as Record<string, unknown>)["extra-header"] = "x";
-    expect(isManagedShape(e, MCP_URL)).toBe(false);
-  });
-  it("duplicate logical header names (case-folded collision)", () => {
-    const e: Record<string, unknown> = managedEntry(KEY_A);
-    (e.headers as Record<string, unknown>)["LUNAROUTE-api-key"] = KEY_A;
-    expect(isManagedShape(e, MCP_URL)).toBe(false);
-  });
-  it("non-object and undefined entries", () => {
-    expect(isManagedShape(undefined, MCP_URL)).toBe(false);
-    expect(isManagedShape("nope", MCP_URL)).toBe(false);
-    expect(isManagedShape(null, MCP_URL)).toBe(false);
-  });
-});
-
-describe("reconciler (matrix)", () => {
-  function setup() {
-    const logs: { level: string; message: string }[] = [];
-    const log = (level: "info" | "warn", message: string) => logs.push({ level, message });
-    const r = createMcpReconciler(MCP_URL, log, "sess-1");
-    return { r, logs };
-  }
-  const SK = "/store/auth.json";
-
-  it("valid + absent → inject (records fingerprint; attribution shares the session id)", () => {
-    const { r } = setup();
-    const cfg: Record<string, unknown> = {};
-    r.reconcile(cfg, { state: "valid", key: KEY_A }, SK);
-    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute;
-    expect(entry).toBeDefined();
-    expect((entry.headers as Record<string, string>)["LUNAROUTE-API-KEY"]).toBe(KEY_A);
-    expect((entry.headers as Record<string, string>)["lunaroute-session-id"]).toBe("sess-1");
-    expect((entry.headers as Record<string, string>)["lunaroute-agent"]).toBe("opencode");
-  });
-  it("valid + ours → replace header values with current key", () => {
-    const { r } = setup();
-    const cfg = cfgWith(managedEntry(KEY_A));
-    r.reconcile(cfg, { state: "valid", key: KEY_B }, SK);
-    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute as { headers: Record<string, string> };
-    expect(entry.headers["LUNAROUTE-API-KEY"]).toBe(KEY_B);
-  });
-  it("valid + user-owned → untouched + info log", () => {
-    const { r, logs } = setup();
-    const cfg = cfgWith({ type: "remote", url: "https://mine", headers: { A: "b" } });
-    r.reconcile(cfg, { state: "valid", key: KEY_A }, SK);
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toEqual({ type: "remote", url: "https://mine", headers: { A: "b" } });
-    expect(logs.some((l) => l.level === "info" && /user-defined mcp/.test(l.message))).toBe(true);
-  });
-  it("logged-out + absent → nothing", () => {
-    const { r } = setup();
-    const cfg: Record<string, unknown> = {};
-    r.reconcile(cfg, { state: "logged-out" }, SK);
-    expect(cfg).toEqual({});
-  });
-  it("logged-out + ours (fingerprint known) → removed", () => {
-    const { r } = setup();
-    const cfg = cfgWith(managedEntry(KEY_A));
-    r.reconcile(cfg, { state: "valid", key: KEY_A }, SK); // inject first
-    r.reconcile(cfg, { state: "logged-out" }, SK);
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-  });
-  it("logged-out + ours (unknown credential) → retained + info log", () => {
-    const { r, logs } = setup();
-    const cfg = cfgWith(managedEntry("lr_unknown_key"));
-    r.reconcile(cfg, { state: "logged-out" }, SK);
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeDefined();
-    expect(logs.some((l) => /unknown credential/.test(l.message))).toBe(true);
-  });
-  it("indeterminate + managed entry → retained + one warn", () => {
-    const { r, logs } = setup();
-    const cfg = cfgWith(managedEntry(KEY_A));
-    r.reconcile(cfg, { state: "indeterminate", reason: "auth store missing" }, SK);
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeDefined();
-    expect(logs.filter((l) => l.level === "warn")).toHaveLength(1);
-  });
-  it("indeterminate + nothing to retain → silent no-op", () => {
-    const { r, logs } = setup();
-    const cfg: Record<string, unknown> = {};
-    r.reconcile(cfg, { state: "indeterminate", reason: "auth store missing" }, SK);
-    expect(logs).toEqual([]);
-  });
-});
-
-describe("multi-generation + isolation + eviction", () => {
-  const SK = "/store/auth.json";
-  it("rotation across generations: both cleaned on logout", () => {
-    const logs: { level: string; message: string }[] = [];
-    const r = createMcpReconciler(MCP_URL, (l, m) => logs.push({ level: l, message: m }), "sess-1");
-    const gen1 = cfgWith(managedEntry(KEY_A));
-    const gen2: Record<string, unknown> = {};
-    r.reconcile(gen1, { state: "valid", key: KEY_A }, SK);
-    r.reconcile(gen2, { state: "valid", key: KEY_B }, SK);
-    r.reconcile(gen1, { state: "logged-out" }, SK);
-    r.reconcile(gen2, { state: "logged-out" }, SK);
-    expect((gen1.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-    expect((gen2.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-  });
-  it("eviction bound, both sides: 2–9 removed, 1 retained", () => {
-    const r = createMcpReconciler(MCP_URL, () => {}, "sess-1");
-    const gens: Record<string, unknown>[] = [];
-    for (let i = 1; i <= 9; i++) {
-      const g: Record<string, unknown> = {};
-      r.reconcile(g, { state: "valid", key: `lr_k${i}` }, SK);
-      gens.push(g);
-    }
-    for (const g of gens) r.reconcile(g, { state: "logged-out" }, SK);
-    for (let i = 1; i <= 9; i++) {
-      const entry = (gens[i - 1].mcp as Record<string, unknown>).lunaroute;
-      if (i === 1) expect(entry).toBeDefined();  // evicted fingerprint → retained
-      else expect(entry).toBeUndefined();         // still tracked → removed
-    }
-  });
-  it("re-injection refreshes eviction position (both sides)", () => {
-    const r = createMcpReconciler(MCP_URL, () => {}, "sess-1");
-    // k1 injected first; then k2..k8 fill the set; refreshing k1 moves it to most-recent;
-    // adding k9 evicts k2 (oldest by write), NOT k1.
-    const k1gen: Record<string, unknown> = {};
-    r.reconcile(k1gen, { state: "valid", key: "lr_k1" }, SK);
-    const g: Record<string, unknown> = {};
-    for (let i = 2; i <= 8; i++) r.reconcile(g, { state: "valid", key: `lr_k${i}` }, SK);
-    r.reconcile(g, { state: "valid", key: "lr_k1" }, SK); // refresh k1 to most-recent
-    r.reconcile(g, { state: "valid", key: "lr_k9" }, SK); // evicts k2, not k1
-    r.reconcile(k1gen, { state: "logged-out" }, SK); // k1 still tracked → removed (the refresh is what kept it known)
-    expect((k1gen.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-    const k2gen = cfgWith(managedEntry("lr_k2")); // k2 was evicted → unknown → retained
-    r.reconcile(k2gen, { state: "logged-out" }, SK);
-    expect((k2gen.mcp as Record<string, unknown>).lunaroute).toBeDefined();
-  });
-  it("store-key isolation: logout in one store never touches another", () => {
-    const r = createMcpReconciler(MCP_URL, () => {}, "sess-1");
-    const g1 = cfgWith(managedEntry(KEY_A));
-    const g2 = cfgWith(managedEntry(KEY_A));
-    r.reconcile(g1, { state: "valid", key: KEY_A }, "/s1/auth.json");
-    r.reconcile(g2, { state: "valid", key: KEY_A }, "/s2/auth.json");
-    r.reconcile(g1, { state: "logged-out" }, "/s1/auth.json");
-    expect((g1.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-    expect((g2.mcp as Record<string, unknown>).lunaroute).toBeDefined();
-  });
-  it("store-key lifecycle: same logical store across present→missing→restored (lexical key)", () => {
-    const r = createMcpReconciler(MCP_URL, () => {}, "sess-1");
-    const g = cfgWith(managedEntry(KEY_A));
-    r.reconcile(g, { state: "valid", key: KEY_A }, SK);
-    r.reconcile(g, { state: "indeterminate", reason: "auth store missing" }, SK); // missing interval: retain
-    expect((g.mcp as Record<string, unknown>).lunaroute).toBeDefined();
-    r.reconcile(g, { state: "valid", key: KEY_A }, SK); // restored: refresh
-    r.reconcile(g, { state: "logged-out" }, SK); // logout: remove
-    expect((g.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-  });
-});
-
-describe("redaction", () => {
-  it("no credential material in any log line (current, historical, malformed)", () => {
-    const logs: string[] = [];
-    const r = createMcpReconciler(MCP_URL, (_l, m) => logs.push(m), "sess-1");
-    const g = cfgWith(managedEntry(KEY_A));
-    r.reconcile(g, { state: "valid", key: KEY_A }, "/s/auth.json");
-    r.reconcile(g, { state: "indeterminate", reason: "auth store unparseable" }, "/s/auth.json");
-    r.reconcile(g, { state: "logged-out" }, "/s/auth.json");
-    for (const line of logs) {
-      expect(line).not.toContain(KEY_A);
-      expect(line).not.toContain(credentialFingerprint(KEY_A));
-    }
-  });
-});
-
-describe("defer to any same-URL server (kata h4j3)", () => {
-  function setup() {
-    const logs: { level: string; message: string }[] = [];
-    const log = (level: "info" | "warn", message: string) => logs.push({ level, message });
-    const r = createMcpReconciler(MCP_URL, log, "sess-1");
-    return { r, logs };
-  }
-  const SK = "/store/auth.json";
-  const foreignEntry = (url: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-    type: "remote",
-    url,
-    headers: { "X-USER-KEY": "user-static-key" },
-    oauth: false,
-    enabled: true,
-    ...extra,
-  });
-  const notices = (logs: { level: string; message: string }[]) =>
-    logs.filter((l) => /deferring to it/.test(l.message));
-  const V = { state: "valid", key: KEY_A } as const;
-
-  it("foreign name + same URL → no write by the plugin, one-time notice", () => {
-    const { r, logs } = setup();
-    const cfg: Record<string, unknown> = { mcp: { "my-lunaroute": foreignEntry(MCP_URL) } };
-    r.reconcile(cfg, V, SK);
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-    expect(notices(logs)).toHaveLength(1);
-    // second run (same instance reload): no second notice, still no write
-    const cfg2: Record<string, unknown> = { mcp: { "my-lunaroute": foreignEntry(MCP_URL) } };
-    r.reconcile(cfg2, V, SK);
-    expect((cfg2.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-    expect(notices(logs)).toHaveLength(1);
-  });
-
-  it("URL tolerance: case + trailing slash match; http and different path don't", () => {
-    const { r, logs } = setup();
-    const cfg: Record<string, unknown> = { mcp: { other: foreignEntry("HTTPS://MCP.Lunaroute.com/mcp/") } };
-    r.reconcile(cfg, V, SK);
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined();
-    expect(notices(logs)).toHaveLength(1);
-
-    const { r: r2, logs: logs2 } = setup();
-    const cfg2: Record<string, unknown> = { mcp: { other: foreignEntry("http://mcp.lunaroute.com/mcp") } };
-    r2.reconcile(cfg2, V, SK);
-    expect((cfg2.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
-    expect(notices(logs2)).toHaveLength(0);
-
-    const { r: r3 } = setup();
-    const cfg3: Record<string, unknown> = { mcp: { other: foreignEntry("https://mcp.lunaroute.com/other") } };
-    r3.reconcile(cfg3, V, SK);
-    expect((cfg3.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
-  });
-
-  it("foreign name + different URL → plugin registration proceeds as today", () => {
-    const { r, logs } = setup();
-    const cfg: Record<string, unknown> = { mcp: { "unrelated": foreignEntry("https://example.com/mcp") } };
-    r.reconcile(cfg, V, SK);
-    expect((cfg.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
-    expect(notices(logs)).toHaveLength(0);
-  });
-
-  it("managed-shape mcp.lunaroute → still refreshed (no regression)", () => {
-    const { r, logs } = setup();
-    const cfg = cfgWith(managedEntry(KEY_A));
-    r.reconcile(cfg, { state: "valid", key: KEY_B }, SK);
-    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute as { headers: Record<string, string> };
-    expect(entry.headers["LUNAROUTE-API-KEY"]).toBe(KEY_B);
-    expect(notices(logs)).toHaveLength(0);
-  });
-
-  it("late-appearing foreign same-URL entry after we registered → ours removed (credential ours), user entry untouched", () => {
-    const { r, logs } = setup();
-    const cfg: Record<string, unknown> = {};
-    r.reconcile(cfg, V, SK); // we register
-    expect((cfg.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined();
-    (cfg.mcp as Record<string, unknown>)["my-lunaroute"] = foreignEntry(MCP_URL);
-    r.reconcile(cfg, V, SK); // foreign appears later
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined(); // ours removed
-    expect((cfg.mcp as Record<string, unknown>)["my-lunaroute"]).toBeDefined(); // user's untouched
-    expect(logs.some((l) => /removed our duplicate/.test(l.message))).toBe(true);
-    expect(notices(logs)).toHaveLength(1);
-  });
-
-  it("late-appearing foreign + unknown credential in our entry → left untouched with info", () => {
-    const { r, logs } = setup();
-    const cfg: Record<string, unknown> = {};
-    r.reconcile(cfg, V, SK);
-    // the managed entry's key is swapped behind our back (not a fingerprint we placed)
-    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute as { headers: Record<string, string> };
-    entry.headers["LUNAROUTE-API-KEY"] = "lr_not_ours";
-    (cfg.mcp as Record<string, unknown>)["my-lunaroute"] = foreignEntry(MCP_URL);
-    r.reconcile(cfg, V, SK);
-    expect((cfg.mcp as Record<string, Record<string, unknown>>).lunaroute).toBeDefined(); // left, not ours to remove
-    expect(logs.some((l) => /unknown credential/.test(l.message))).toBe(true);
-    expect(notices(logs)).toHaveLength(1);
-  });
-
-  it("logout with a foreign same-URL entry present → ours removed (if placed), user entry untouched", () => {
-    const { r } = setup();
-    const cfg: Record<string, unknown> = {};
-    r.reconcile(cfg, V, SK); // we place ours
-    (cfg.mcp as Record<string, unknown>)["my-lunaroute"] = foreignEntry(MCP_URL);
-    r.reconcile(cfg, { state: "logged-out" }, SK);
-    expect((cfg.mcp as Record<string, unknown>).lunaroute).toBeUndefined(); // ours removed
-    expect((cfg.mcp as Record<string, unknown>)["my-lunaroute"]).toBeDefined(); // user's survives
-  });
-
-  it("user-owned exact-name entry + foreign same-URL → plugin stays out entirely", () => {
-    const { r, logs } = setup();
-    const cfg: Record<string, unknown> = {
-      mcp: {
-        lunaroute: foreignEntry(MCP_URL), // diverged shape (different headers) at our name
-        "my-lunaroute": foreignEntry(MCP_URL),
+    expect(setCalls).toHaveLength(1);
+    expect(setCalls[0].name).toBe("lunaroute");
+    expect(setCalls[0].config).toEqual({
+      type: "remote",
+      url: "https://mcp.example/mcp",
+      headers: {
+        "LUNAROUTE-API-KEY": "lr_key",
+        "lunaroute-agent": "opencode",
+        "x-lunaroute-session": "sess-1",
+        "lunaroute-session-id": "sess-1",
       },
-    };
-    r.reconcile(cfg, V, SK);
-    const entry = (cfg.mcp as Record<string, Record<string, unknown>>).lunaroute as { headers: Record<string, string> };
-    expect(entry.headers["X-USER-KEY"]).toBe("user-static-key"); // untouched
-    expect(logs.some((l) => /user-defined mcp.lunaroute in effect/.test(l.message))).toBe(true);
-    expect(notices(logs)).toHaveLength(1);
+      oauth: false,
+      disabled: false,
+    });
+  });
+
+  it("places nothing when the MCP setting is off, and honors a later replay", async () => {
+    let enabled = false;
+    const { ctx, setCalls, reload } = makeCtx();
+    const mcp = createLunarouteMcp(opts({ enabled: () => enabled }));
+    await mcp.register(ctx, "lr_key");
+    expect(setCalls).toHaveLength(0);
+
+    enabled = true;
+    await mcp.refresh(ctx, "lr_key");
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(setCalls).toHaveLength(1);
+  });
+
+  it("places nothing when logged out", async () => {
+    const { ctx, setCalls } = makeCtx();
+    await createLunarouteMcp(opts()).register(ctx, undefined);
+    expect(setCalls).toHaveLength(0);
+  });
+
+  it("never overwrites a user-defined mcp.lunaroute entry", async () => {
+    const d = opts();
+    const { ctx, setCalls } = makeCtx([["lunaroute", { url: "https://custom.example/mcp" }]]);
+    await createLunarouteMcp(d).register(ctx, "lr_key");
+
+    expect(setCalls).toHaveLength(0);
+    expect(d.log).toHaveBeenCalledWith("info", expect.stringContaining("user-defined mcp.lunaroute"));
+  });
+
+  it("defers to any other entry pointing at the hosted URL, once", async () => {
+    const d = opts();
+    const { ctx, setCalls, reload } = makeCtx([["my-lunaroute", { url: "https://mcp.example/mcp/" }]]);
+    const mcp = createLunarouteMcp(d);
+    await mcp.register(ctx, "lr_key1");
+    await mcp.refresh(ctx, "lr_key2"); // replay: notice stays single-shot
+
+    expect(setCalls).toHaveLength(0);
+    const defers = (d.log as ReturnType<typeof vi.fn>).mock.calls.filter(([, m]) =>
+      String(m).includes("deferring to it"),
+    );
+    expect(defers).toHaveLength(1);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("refresh replays the transform with the new key", async () => {
+    const { ctx, setCalls, reload } = makeCtx();
+    const mcp = createLunarouteMcp(opts());
+    await mcp.register(ctx, "lr_old");
+    await mcp.refresh(ctx, "lr_new");
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(setCalls.map((c) => c.config.headers["LUNAROUTE-API-KEY"])).toEqual(["lr_old", "lr_new"]);
+  });
+});
+
+describe("normalizedUrlIdentity / buildMcpServer", () => {
+  it("ignores trailing slashes and query strings, keeps scheme+host", () => {
+    expect(normalizedUrlIdentity({ url: "https://mcp.example/mcp/" })).toBe("https://mcp.example/mcp");
+    expect(normalizedUrlIdentity({ url: "https://MCP.example/mcp?x=1" })).toBe("https://mcp.example/mcp");
+    expect(normalizedUrlIdentity({ url: "http://mcp.example/mcp" })).toBe("http://mcp.example/mcp");
+    expect(normalizedUrlIdentity({ url: "not a url" })).toBeUndefined();
+    expect(normalizedUrlIdentity({})).toBeUndefined();
+  });
+
+  it("builds a disabled:false remote server", () => {
+    expect(buildMcpServer("k", "https://mcp.example/mcp", "s")).toMatchObject({
+      type: "remote",
+      url: "https://mcp.example/mcp",
+      disabled: false,
+      oauth: false,
+    });
   });
 });

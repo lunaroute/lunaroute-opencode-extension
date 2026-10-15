@@ -1,4 +1,4 @@
-import { tool, type ToolDefinition } from "@opencode-ai/plugin";
+import { tool, type ToolDefinition } from "./tool-api.js";
 import { buildAttributionHeaders } from "./lunaroute.js";
 import type { AuthResolution } from "./mcp.js";
 import { resolveSearchProvider, webToolsEnabled, type LunarouteSettings } from "./settings.js";
