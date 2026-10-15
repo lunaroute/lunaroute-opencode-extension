@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { ToolContext } from "@opencode-ai/plugin";
+import type { ToolCallContextLike as ToolContext } from "../src/tool-api.js";
 import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ import {
   sniffDocumentFormat,
   type ConvertToolMapDeps,
 } from "../src/convert-tools.js";
-import type { ToolResult } from "@opencode-ai/plugin";
+import type { ToolResult } from "../src/tool-api.js";
 import type { FetchLike, McpToolCallResult } from "../src/web-tools.js";
 import { defaultIo, type ImageIo } from "../src/image-tools.js";
 

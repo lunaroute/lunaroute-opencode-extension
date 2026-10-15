@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { ToolContext, ToolResult } from "@opencode-ai/plugin";
+import type { ToolCallContextLike as ToolContext, ToolResult } from "../src/tool-api.js";
 import { DEFAULT_SETTINGS } from "../src/settings.js";
 import {
   buildWebToolMap,

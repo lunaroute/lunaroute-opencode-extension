@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { ToolContext } from "@opencode-ai/plugin";
+import type { ToolCallContextLike as ToolContext } from "../src/tool-api.js";
 import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

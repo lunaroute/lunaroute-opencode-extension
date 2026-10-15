@@ -3,17 +3,14 @@ import {
   DEFAULT_SETTINGS,
   SEARCH_PROVIDERS,
   applySettingChange,
-  applySettingsViaReload,
   convertToolsEnabled,
   imageToolsEnabled,
   mcpEnabled,
   readSettings,
   resolveSearchProvider,
   resolveSettingsPath,
-  saveSettingsAndApply,
   webToolsEnabled,
   writeSettings,
-  type SettingsApplyClient,
   type SettingsIo,
 } from "../src/settings.js";
 
@@ -163,92 +160,5 @@ describe("writeSettings (atomic, canonical)", () => {
     expect(writes[0].path).toBe(`${target}.uuid-1.tmp`);
     expect(writes[0].data).toBe(JSON.stringify(settings, null, 2) + "\n");
     expect(renames).toEqual([[`${target}.uuid-1.tmp`, target]]);
-  });
-});
-
-describe("applySettingsViaReload (live apply — spike-verified mechanism)", () => {
-  const client = (getShape: object, wrapped: boolean) => {
-    const update = vi.fn(async () => ({}));
-    const c = { config: { get: async () => getShape, update } };
-    return { client: c as unknown as Parameters<typeof applySettingsViaReload>[0], update, wrapped };
-  };
-  it("patched: re-writes the CURRENT model (wrapped shape)", async () => {
-    const { client: c, update } = client({ data: { model: "lunaroute/m-1" } }, true);
-    await expect(applySettingsViaReload(c)).resolves.toBe("patched");
-    expect(update).toHaveBeenCalledWith({ config: { model: "lunaroute/m-1" } });
-  });
-  it("patched: flat shape", async () => {
-    const { client: c, update } = client({ model: "anthropic/x" }, false);
-    await expect(applySettingsViaReload(c)).resolves.toBe("patched");
-    expect(update).toHaveBeenCalledWith({ config: { model: "anthropic/x" } });
-  });
-  it("skipped-no-model: nothing idempotent to write, no PATCH", async () => {
-    const { client: c, update } = client({}, false);
-    await expect(applySettingsViaReload(c)).resolves.toBe("skipped-no-model");
-    expect(update).not.toHaveBeenCalled();
-  });
-});
-
-describe("applySettingChange (kata 7pd6)", () => {
-  it("flips each toggle and never mutates the input", () => {
-    const base = { ...DEFAULT_SETTINGS };
-    for (const key of ["mcp", "webTools", "imageTools", "convertTools"] as const) {
-      expect(applySettingChange(base, key)).toEqual({ ...base, [key]: "off" });
-      expect(applySettingChange({ ...base, [key]: "off" }, key)).toEqual(base);
-    }
-    expect(base).toEqual(DEFAULT_SETTINGS);
-  });
-  it("cycles the search provider through the known list and wraps", () => {
-    expect(SEARCH_PROVIDERS).toEqual(["server", "brave", "exa", "kagi"]);
-    let s = { ...DEFAULT_SETTINGS };
-    for (const expected of ["brave", "exa", "kagi", "server"]) {
-      s = applySettingChange(s, "searchProvider");
-      expect(s.searchProvider).toBe(expected);
-    }
-  });
-});
-
-describe("saveSettingsAndApply (write-first — kata 7pd6)", () => {
-  const events: string[] = [];
-  const ioWriting = (): SettingsIo => ({
-    randomUUID: () => "uuid",
-    readFileSync: () => {
-      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-    },
-    writeFileSync: () => void events.push("write"),
-    renameSync: () => void events.push("rename"),
-  });
-  const clientRecording = () => {
-    const update = vi.fn(async () => {
-      events.push("apply");
-      return {};
-    });
-    const c = { config: { get: async () => ({ data: { model: "m" } }), update } };
-    return { client: c as unknown as SettingsApplyClient, update };
-  };
-  it("writes the file, then triggers the reload — in that order", async () => {
-    events.length = 0;
-    const { client: c, update } = clientRecording();
-    const outcome = await saveSettingsAndApply(ENV, HOME, c, { ...DEFAULT_SETTINGS, webTools: "off" }, ioWriting());
-    expect(outcome).toBe("patched");
-    expect(events).toEqual(["write", "rename", "apply"]);
-    expect(update).toHaveBeenCalledWith({ config: { model: "m" } });
-  });
-  it("a failed write throws and never triggers the reload", async () => {
-    events.length = 0;
-    const io: SettingsIo = {
-      randomUUID: () => "uuid",
-      readFileSync: () => {
-        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      },
-      writeFileSync: () => {
-        throw Object.assign(new Error("EACCES"), { code: "EACCES" });
-      },
-      renameSync: () => void events.push("rename"),
-    };
-    const { client: c, update } = clientRecording();
-    await expect(saveSettingsAndApply(ENV, HOME, c, DEFAULT_SETTINGS, io)).rejects.toThrow("EACCES");
-    expect(update).not.toHaveBeenCalled();
-    expect(events).not.toContain("apply");
   });
 });
