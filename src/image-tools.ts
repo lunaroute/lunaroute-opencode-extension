@@ -1,4 +1,4 @@
-import { tool, type ToolDefinition, type ToolResult } from "@opencode-ai/plugin";
+import { tool, type ToolDefinition, type ToolResult } from "./tool-api.js";
 import { randomUUID } from "node:crypto";
 import { chmod, link, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";

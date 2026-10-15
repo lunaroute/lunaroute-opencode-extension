@@ -382,7 +382,7 @@ describe("buildImageToolMap", () => {
     expect(Object.keys(map).sort()).toEqual(["edit_image", "generate_image", "upload_image"]);
     expect(calls).toHaveLength(0); // descriptors provided → no initialize/tools-list traffic
     // enum baking: the model arg is a zod enum over the server's per-org values
-    const model = (map.generate_image.args as unknown as { model: { safeParse(v: string): { success: boolean } } }).model;
+    const model = ((map.generate_image.input as unknown as { shape: { model: { safeParse(v: string): { success: boolean } } } }).shape).model;
     expect(model.safeParse("m1").success).toBe(true);
     expect(model.safeParse("not-in-enum").success).toBe(false);
   });

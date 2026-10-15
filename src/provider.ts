@@ -43,6 +43,8 @@ export type ProviderDeps = {
 export function createLunarouteProvider(deps: ProviderDeps): {
   register(ctx: ProviderCtxLike): Promise<void>;
   refresh(ctx: ProviderCtxLike): Promise<void>;
+  /** Last successfully loaded catalog — read by the default-model picker. */
+  getModels(): MappedModel[];
 } {
   // Last catalog that loaded successfully. A failed refresh keeps it (v1's
   // availability policy: never wipe models the user can still use).
@@ -104,5 +106,6 @@ export function createLunarouteProvider(deps: ProviderDeps): {
       await load();
       await ctx.provider.reload();
     },
+    getModels: () => models,
   };
 }
