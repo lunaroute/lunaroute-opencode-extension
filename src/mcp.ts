@@ -72,15 +72,20 @@ export function createLunarouteMcp(opts: {
   mcpUrl: string;
   sessionId: string;
   log: McpLog;
+  /** Settings gate, read inside the transform so a replay (refresh or a
+   * location reload after a settings change) honors the current file. */
+  enabled?: () => boolean;
 }): {
   register(ctx: McpCtxLike, key: string | undefined): Promise<void>;
   refresh(ctx: McpCtxLike, key: string | undefined): Promise<void>;
 } {
   let key: string | undefined;
   let deferNoticeShown = false;
+  const isEnabled = opts.enabled ?? (() => true);
 
   const apply = async (ctx: McpCtxLike): Promise<void> => {
     await ctx.mcp.transform((editor) => {
+      if (!isEnabled()) return; // mcp off: registry rebuild drops our entry
       if (!key) return; // logged out: registry rebuild drops our entry
       const target = normalizedUrlIdentity({ url: opts.mcpUrl });
       for (const [name, entry] of editor.list()) {

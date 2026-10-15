@@ -116,7 +116,12 @@ export default Plugin.define({
     );
 
     // --- Hosted MCP ----------------------------------------------------------
-    const mcp = createLunarouteMcp({ mcpUrl, sessionId, log });
+    const mcp = createLunarouteMcp({
+      mcpUrl,
+      sessionId,
+      log,
+      enabled: () => mcpEnabled(settingsNow()),
+    });
     await mcp.register(ctx as unknown as McpCtxLike, await reader());
 
     // --- First-class tools (web / image / convert) ---------------------------

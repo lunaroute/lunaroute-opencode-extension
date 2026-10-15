@@ -63,6 +63,19 @@ describe("createLunarouteMcp", () => {
     });
   });
 
+  it("places nothing when the MCP setting is off, and honors a later replay", async () => {
+    let enabled = false;
+    const { ctx, setCalls, reload } = makeCtx();
+    const mcp = createLunarouteMcp(opts({ enabled: () => enabled }));
+    await mcp.register(ctx, "lr_key");
+    expect(setCalls).toHaveLength(0);
+
+    enabled = true;
+    await mcp.refresh(ctx, "lr_key");
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(setCalls).toHaveLength(1);
+  });
+
   it("places nothing when logged out", async () => {
     const { ctx, setCalls } = makeCtx();
     await createLunarouteMcp(opts()).register(ctx, undefined);
