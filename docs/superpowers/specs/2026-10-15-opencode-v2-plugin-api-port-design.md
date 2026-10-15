@@ -117,3 +117,34 @@ check on every opencode bump while upstream #51802/#42856 remain open.
 - OAuth-for-static-key `expires` semantics unverified (P1-1).
 - `console.*` log capture unverified on this platform (P1-2).
 - TUI live load cannot be tested headless; needs a real TTY.
+
+## Port verification log (2026-10-15, opencode 2.0.29)
+
+Live spike with the real plugin loaded from the worktree (isolated HOME,
+watchdog-free local-dir entry via root `index.ts`/`tui.ts` shims):
+
+- Plugin state: `opencode plugin list` → `lunaroute local`; `GET /api/plugin`
+  → `lunaroute … local active`; server log shows `loading plugin` with no
+  load error.
+- Integration: `GET /api/integration` → `lunaroute` with `browser`, `remote`,
+  `key` methods before any connection.
+- Credential wiring: key login (API) → catalog fetch and model requests
+  carried `Authorization: Bearer lr_spike_key_123` plus the attribution
+  triple; provider and models materialized in `/api/provider` `/api/model`
+  with the `completions` wire package under `LUNAROUTE_API=completions`.
+- OAuth method (P1-1): `integration.oauth.connect` returned the device URL +
+  state; `integration.oauth.complete` with a pasted `code=…&state=…` ran the
+  callback, hit the exchange endpoint with the PKCE verifier, and stored a
+  `method:"oauth"` credential (static key as `Credential.OAuth`, empty
+  refresh, far-future `expires`). The next model request used
+  `Bearer <access>` — no refresh attempt, no `needs_auth`. Remaining
+  unverified: the browser `auto` variant (needs a real browser).
+- MCP: the hosted URL received initialize/tools-list traffic with
+  `lunaroute-api-key` + attribution headers.
+- Logging (P1-2): plugin `console.*` output is NOT captured in
+  `opencode.log` on 2.0.29. Decision: keep `console.*` as the sink, document
+  the caveat, and rely on native surfaces (`/connect`, MCP status, TUI
+  toasts) for user-facing failures. Revisit if opencode adds a log API.
+- Still manual: TUI plugin load in a real TTY (`/lunaroute` palette command,
+  settings toggle + Refresh models), first-class tools end-to-end against the
+  hosted MCP with a real key, published-tarball install, v1 pin smoke.
