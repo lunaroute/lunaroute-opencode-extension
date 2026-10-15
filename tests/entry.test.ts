@@ -42,7 +42,7 @@ function makeEventStream() {
   };
 }
 
-function makeCtx() {
+function makeCtx(auth?: { key: string }) {
   const providerAdded: { info: Record<string, unknown>; models: unknown[] }[] = [];
   const methods: Record<string, unknown>[] = [];
   const hooks: Hook[] = [];
@@ -64,7 +64,10 @@ function makeCtx() {
           update: (_id: string, update: (ref: { id: string; name?: string }) => void) => update({ id: "lunaroute", name: "LunaRoute" }),
           method: { update: (input: never) => void methods.push(input) },
         }),
-      connection: { active: async () => undefined, resolve: async () => undefined },
+      connection: {
+        active: async () => (auth ? { id: "cred_test" } : undefined),
+        resolve: async () => (auth ? { type: "key", key: auth.key } : undefined),
+      },
     },
     session: {
       hook: async (name: string, cb: (event: unknown) => void, opts: unknown) => {
@@ -139,6 +142,31 @@ describe("lunaroute v2 entry", () => {
 
     expect(typeof cleanup).toBe("function");
     cleanup?.();
+  });
+
+  it("registers first-class tools with a declared output schema (kata fhk4)", async () => {
+    const tools = ["generate_image", "web_search", "convert_document"];
+    vi.stubGlobal("fetch", async (url: string, init?: { body?: string }) => {
+      const jsonResponse = (payload: unknown) =>
+        ({ ok: true, status: 200, text: async () => JSON.stringify(payload) }) as unknown as Response;
+      if (url.includes("/models")) return jsonResponse({ data: [] });
+      const body = JSON.parse(String(init?.body)) as { id: number; method: string };
+      if (body.method === "tools/list") {
+        return jsonResponse({ jsonrpc: "2.0", id: body.id, result: { tools: tools.map((name) => ({ name })) } });
+      }
+      return jsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+    try {
+      const { ctx, toolAdded } = makeCtx({ key: "lr_test_0000000000000000" });
+      await lunaroute.setup(ctx as never);
+      expect(toolAdded.length).toBeGreaterThan(0);
+      for (const tool of toolAdded as { input?: unknown; output?: unknown }[]) {
+        expect(tool.input).toBeDefined();
+        expect(tool.output).toBeDefined();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("refreshes provider, MCP, tools, and models on credential events for our integration", async () => {
