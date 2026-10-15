@@ -1,13 +1,10 @@
 import { homedir } from "node:os";
-import type { TuiDialogSelectOption, TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui";
-import {
-  applySettingChange,
-  readSettings,
-  saveSettingsAndApply,
-  type SettingsApplyClient,
-  type SettingsApplyOutcome,
-  type SettingsKey,
-} from "./settings.js";
+// Type-only import: the v2 definition shape is `{ id, setup }` (Plugin.define
+// is the identity), so the TUI plugin needs no runtime import of
+// @opencode/plugin/tui — which also keeps its solid-js peers out of the CLI
+// process, since this plugin renders no JSX.
+import type { Plugin as TuiPlugin } from "@opencode/plugin/tui";
+import { applySettingChange, readSettings, writeSettings, type SettingsKey } from "./settings.js";
 
 /** The five settings rows, with the only UI-specific text (label/summary). */
 const ROWS: readonly { key: SettingsKey; label: string; description: string }[] = [
@@ -18,71 +15,99 @@ const ROWS: readonly { key: SettingsKey; label: string; description: string }[] 
   { key: "convertTools", label: "Document tools", description: "convert_document" },
 ];
 
+const REFRESH = "__refresh";
+
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
- * `/lunaroute` — the TUI settings command (kata 7pd6, pi bjy9 parity).
+ * `/lunaroute` — the v2 CLI plugin (kata 7pd6 / kata 4qqn).
  *
- * Runs in the TUI process, outside the prompt loop (a server-plugin slash
- * command is a prompt command and would spend a model turn). Write-first: a
- * toggle persists the file, then triggers the instance reload
- * (phase 1, spike-verified — docs/settings-live-apply-spike.md). A failed
- * write never triggers a reload and surfaces an error toast.
- *
- * Loading/packaging: a TUI plugin is declared in `tui.json` (`plugin` array)
- * and a package exposes it via `exports["./tui"]` with a default export
- * `{ id, tui }` — see docs/tui-plugin-loading-spike.md.
+ * v2 TUI plugins run from the package's `./tui` export (loaded automatically
+ * from the same opencode.json `plugins` entry as the server plugin; no
+ * tui.json) and register commands through a reactive keymap layer. Live apply
+ * uses the native `client.location.reload()`: the settings file is written
+ * first, then the location reboots and the server plugin re-reads settings
+ * inside its transforms. The v1 config-PATCH reload hack is gone.
  */
-const tui: TuiPlugin = async (api) => {
+const definition = {
+  id: "lunaroute-tui",
+  setup(context: TuiPlugin.Context) {
+    context.keymap.layer(() => ({
+      mode: "global",
+      priority: 10,
+      commands: [
+        {
+          id: "lunaroute.settings",
+          title: "LunaRoute settings",
+          description: "View and toggle LunaRoute tools; refresh the model catalog",
+          group: "LunaRoute",
+          palette: true,
+          slash: { name: "lunaroute" },
+          run: async () => {
+            await open(context);
+          },
+        },
+      ],
+      bindings: ["lunaroute.settings"],
+    }));
+  },
+} satisfies TuiPlugin.Definition;
+
+export default definition;
+
+type TuiContext = TuiPlugin.Context;
+
+async function open(context: TuiContext): Promise<void> {
   const env = process.env;
   const home = homedir();
-  const client = api.client as unknown as SettingsApplyClient;
-
-  const open = () => {
-    const settings = readSettings(env, home);
-    const options: TuiDialogSelectOption<SettingsKey>[] = ROWS.map((row) => ({
+  const settings = readSettings(env, home);
+  const options = [
+    ...ROWS.map((row) => ({
       title: row.label,
-      value: row.key,
+      value: row.key as string,
       description: `${row.description} — ${String(settings[row.key])}`,
-    }));
-    api.ui.dialog.replace(() =>
-      api.ui.DialogSelect<SettingsKey>({
-        title: "LunaRoute settings",
-        skipFilter: true,
-        options,
-        onSelect: (option) => void apply(option.value),
-      }),
-    );
-  };
+    })),
+    { title: "Refresh models", value: REFRESH, description: "Re-fetch the LunaRoute catalog" },
+  ];
+  const choice = await context.ui.dialog.select<string>({ title: "LunaRoute", options });
+  if (!choice) return;
+  if (choice === REFRESH) {
+    await refresh(context);
+    return;
+  }
+  await apply(context, choice as SettingsKey);
+}
 
-  const apply = async (key: SettingsKey) => {
-    const next = applySettingChange(readSettings(env, home), key);
-    let outcome: SettingsApplyOutcome;
-    try {
-      outcome = await saveSettingsAndApply(env, home, client, next);
-    } catch (err) {
-      api.ui.toast({ variant: "error", title: "LunaRoute", message: `Not saved: ${messageOf(err)}` });
-      return;
-    }
-    api.ui.toast({
+async function apply(context: TuiContext, key: SettingsKey): Promise<void> {
+  const env = process.env;
+  const home = homedir();
+  const next = applySettingChange(readSettings(env, home), key);
+  try {
+    writeSettings(env, home, next);
+  } catch (err) {
+    context.ui.toast.show({ variant: "error", title: "LunaRoute", message: `Not saved: ${messageOf(err)}` });
+    return;
+  }
+  try {
+    await context.client.location.reload();
+    context.ui.toast.show({
       variant: "success",
       title: "LunaRoute",
-      message: `${key} = ${String(next[key])} · ${outcome === "patched" ? "applied live" : "saved; applies on next open"}`,
+      message: `${key} = ${String(next[key])} · applied`,
     });
-    open();
-  };
+  } catch (err) {
+    context.ui.toast.show({ variant: "error", title: "LunaRoute", message: `Saved, but reload failed: ${messageOf(err)}` });
+  }
+}
 
-  // Legacy v1 command API (kept and typed for v1 plugins); the v2 migration is
-  // api.keymap.registerLayer({ commands: [{ slashName: "lunaroute", run }] }).
-  api.command?.register(() => [
-    {
-      title: "LunaRoute settings",
-      value: "lunaroute.settings",
-      description: "View and toggle LunaRoute tools (live apply)",
-      slash: { name: "lunaroute" },
-      onSelect: () => open(),
-    },
-  ]);
-};
-
-export default { id: "lunaroute-tui", tui } satisfies TuiPluginModule;
+async function refresh(context: TuiContext): Promise<void> {
+  try {
+    await context.client.location.reload();
+    const result = await context.client.model.list();
+    const models = result?.data ?? [];
+    const count = models.filter((m) => m.providerID === "lunaroute").length;
+    context.ui.toast.show({ variant: "success", title: "LunaRoute", message: `Models reloaded — ${count} available` });
+  } catch (err) {
+    context.ui.toast.show({ variant: "error", title: "LunaRoute", message: `Model refresh failed: ${messageOf(err)}` });
+  }
+}
