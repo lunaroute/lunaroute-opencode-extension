@@ -94,6 +94,42 @@ export type LoginDeps = {
 };
 export type AuthLog = (level: "info" | "warn", message: string) => void;
 
+/**
+ * Remote-browser paste ladder (kata dw0g), pure. The approval page's only
+ * copy artifact today is a curl command wrapping the callback URL; a paste
+ * may also be the bare URL, a code=...&state=... query, or a bare code.
+ * State is compared only when the paste carries one — the gateway's
+ * single-use + short-TTL code validation is the binding for bare codes.
+ */
+export function extractPastedLogin(
+  pasted: string,
+  expectedState: string,
+): { ok: true; code: string } | { ok: false; reason: string } {
+  const trimmed = pasted.trim();
+  if (!trimmed) return { ok: false, reason: "nothing pasted" };
+  const urlMatch = trimmed.match(/https?:\/\/[^\s'"]+/i);
+  let normalized: string;
+  if (urlMatch) {
+    normalized = urlMatch[0];
+  } else if (/(?:^|[&?])(?:code|state)=/i.test(trimmed)) {
+    // Accept a bare "code=..&state=.." query string (optional leading ?).
+    normalized = `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
+  } else if (/^[A-Za-z0-9._~-]{1,256}={0,2}$/.test(trimmed)) {
+    // A bare authorization code: a single URL-safe token, Base64 trailing
+    // padding allowed (roborev job 1850: `abc=` must not be mistaken for a
+    // query string).
+    normalized = `http://127.0.0.1/callback?code=${encodeURIComponent(trimmed)}`;
+  } else {
+    return { ok: false, reason: "no code found in paste" };
+  }
+  const cb = parseCallbackQuery(normalized);
+  if (!cb.code) return { ok: false, reason: "no code found in paste" };
+  if (new URL(normalized).searchParams.has("state") && cb.state !== expectedState) {
+    return { ok: false, reason: "state mismatch" };
+  }
+  return { ok: true, code: cb.code };
+}
+
 export type StoredAuth =
   | { type: "api"; key: string }
   | { type: "oauth"; access: string; refresh: string; expires: number }
@@ -220,38 +256,10 @@ export function createLunarouteAuth(opts: {
             method: "code" as const,
             callback: async (pasted: string): Promise<{ type: "success"; key: string } | { type: "failed" }> => {
               try {
-                const trimmed = pasted.trim();
-                if (!trimmed) return failRemote("nothing pasted");
-                // Extraction ladder (kata dw0g): the approval page's only copy
-                // artifact today is a curl command wrapping the callback URL;
-                // a paste may also be the bare URL, a code=...&state=... query,
-                // or (once the approval page ships it) a bare code.
-                const urlMatch = trimmed.match(/https?:\/\/[^\s'"]+/i);
-                let normalized: string;
-                if (urlMatch) {
-                  normalized = urlMatch[0];
-                } else if (/(?:^|[&?])(?:code|state)=/i.test(trimmed)) {
-                  // Accept a bare "code=..&state=.." query string (optional leading ?).
-                  normalized = `http://127.0.0.1/callback?${trimmed.replace(/^\?/, "")}`;
-                } else if (/^[A-Za-z0-9._~-]{1,256}={0,2}$/.test(trimmed)) {
-                  // A bare authorization code: a single URL-safe token, Base64
-                  // trailing padding allowed (roborev job 1850: `abc=` must not
-                  // be mistaken for a query string). State is not comparable
-                  // without the URL — the gateway's single-use + short-TTL code
-                  // validation is the binding.
-                  normalized = `http://127.0.0.1/callback?code=${encodeURIComponent(trimmed)}`;
-                } else {
-                  return failRemote("no code found in paste");
-                }
-                const cb = parseCallbackQuery(normalized);
-                if (!cb.code) return failRemote("no code found in paste");
-                // The state binds the paste to this attempt — enforce it only
-                // when the paste carries one (bare-code contract above).
-                if (new URL(normalized).searchParams.has("state") && cb.state !== state) {
-                  return failRemote("state mismatch");
-                }
+                const parsed = extractPastedLogin(pasted, state);
+                if (!parsed.ok) return failRemote(parsed.reason);
                 const result = await d.exchange(resolveApiUrl(opts.env), {
-                  code: cb.code,
+                  code: parsed.code,
                   verifier,
                   label: hostname(),
                 });
