@@ -51,9 +51,10 @@ Where to look:
 
 ## Pending (need a TTY / browser / real key)
 
-- [ ] **TUI plugin loads**: `/lunaroute` appears in the command palette and
-  renders the settings list + Refresh models; toggling writes
-  `lunaroute.json` and reloads; refresh reports the model count.
+- [x] **TUI plugin loads** (2026-10-15, TTY via `script`): `/lunaroute`
+  renders the settings list + Refresh models; toggling Hosted MCP wrote
+  `lunaroute.json` and showed `mcp = off · applied`. TUI features are
+  reported by `/api/plugin` (`server + tui`).
 - [ ] **Browser (auto) OAuth**: `/connect` → LunaRoute → Log in with browser;
   approving in the browser completes without pasting.
 - [ ] **First-class tools end-to-end**: with a real key, `web_search`
@@ -63,8 +64,8 @@ Where to look:
   with the three methods.
 - [ ] **Logout/account switch**: switching accounts updates models, MCP
   headers, and tools after the credential event.
-- [ ] **Published tarball**: `npm pack` → install the tarball from the config
-  the way a user would, and repeat the plugin-load + provider checks.
+- [x] **Published tarball** (2026-10-15): `npm pack` + `file:<tarball>`
+  install loads with `features: {server, tui}` and status active.
 - [ ] **OpenCode 1.x pin**: `@lunaroute/opencode-extension@0.3.1` still
   installs and loads on 1.18.30.
 

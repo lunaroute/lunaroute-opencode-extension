@@ -148,3 +148,12 @@ watchdog-free local-dir entry via root `index.ts`/`tui.ts` shims):
 - Still manual: TUI plugin load in a real TTY (`/lunaroute` palette command,
   settings toggle + Refresh models), first-class tools end-to-end against the
   hosted MCP with a real key, published-tarball install, v1 pin smoke.
+- TUI (verified in a real TTY via `script`): typing `/lunaroute` renders the
+  settings dialog ("Hosted MCP" … "Refresh models"); selecting Hosted MCP
+  wrote `lunaroute.json` (`mcp: "off"`) and showed `mcp = off · applied`,
+  proving the write-first + `client.location.reload()` live-apply path.
+- Packaging: `npm pack` + `file:<tarball>` install reports
+  `features: {server: true, tui: true}` and status active — the published
+  `exports` layout resolves both halves.
+- Remaining manual: browser `auto` OAuth (needs a browser), first-class tools
+  against the real hosted MCP (needs a real key), OpenCode 1.x pin smoke.
