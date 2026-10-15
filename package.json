@@ -31,8 +31,8 @@
     "test": "vitest run",
     "check": "npm run typecheck && npm test"
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": "^1.17.20"
+  "dependencies": {
+    "@opencode/plugin": "2.0.29"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.20",
@@ -41,6 +41,6 @@
     "vitest": "^4.1.0"
   },
   "engines": {
-    "opencode": ">=1.14.49"
+    "opencode": ">=2.0.0"
   }
 }
