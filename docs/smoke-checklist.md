@@ -106,7 +106,7 @@ The release commit — the commit the `v*` tag points at — must carry a line:
 smoke: <YYYY-MM-DD> <all-pass|exceptions>[ note...]
 ```
 
-`all-pass` means every checklist item above is checked or verified; 
+`all-pass` means every checklist item above is checked or verified;
 `exceptions` must be followed by a short note naming each item left open
 and why. The publish workflow enforces the line's presence and shape via
 `scripts/release-tag.mjs` before `npm publish` runs; a tag whose commit
