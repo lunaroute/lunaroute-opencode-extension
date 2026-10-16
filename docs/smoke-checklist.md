@@ -1,30 +1,27 @@
 # Smoke Checklist — @lunaroute/opencode-extension (OpenCode v2)
 
-**Status: headless spikes verified 2026-10-15 on opencode 2.0.29 (kata 4qqn); manual/TTY items pending.**
+**Status: headless items verified 2026-10-15 on opencode 2.0.29 (kata 4qqn);
+manual/TTY items below remain pending and must be run before the next release.**
 
-Run against staging before every release. Set the staging env vars before
-starting OpenCode (for the shared background service use
-`opencode service set env <NAME> <value>`, then `opencode service restart`):
-
-```bash
-export LUNAROUTE_ROUTING_URL=<staging gateway>/v1
-export LUNAROUTE_API_URL=<staging api>
-export LUNAROUTE_FRONT_URL=<staging front>
-export LUNAROUTE_MCP_URL=<staging mcp>/mcp
-```
+Run against production before every release. No environment setup is needed:
+the plugin's baked-in defaults point at the production services
+(`gw.lunaroute.com`, `api.lunaroute.com`, `app.lunaroute.com`,
+`mcp.lunaroute.com`; see `src/lunaroute.ts`). There is no staging
+environment; every item below is runnable against production or a local host,
+and anything that could not be run that way has been deleted rather than left
+pending.
 
 Credentials live in the server's database (v2); `/connect` manages accounts.
-Where to look:
+Where to look while running the items:
 
-- **Gateway logs** (staging): the attribution triple — `lunaroute-agent:
-  opencode`, `x-lunaroute-session`, `lunaroute-session-id` — plus key
-  `source: opencode`.
-- **Staging MCP server logs**: `LUNAROUTE-API-KEY` header + `lunaroute-agent`
+- **Gateway logs** (production, via the server's log access): the attribution
+  triple — `lunaroute-agent: opencode`, `x-lunaroute-session`,
+  `lunaroute-session-id` — plus key `source: opencode`.
+- **Hosted MCP server logs**: `lunaroute-api-key` header + `lunaroute-agent`
   + session id on MCP requests.
-- **Server log**: `~/.local/share/opencode/log/opencode.log` (plugin load
-  lines; note that plugin `console.*` output is not captured there on 2.0.x).
-
----
+- **Local server log**: `~/.local/share/opencode/log/opencode.log` (plugin
+  load lines; note that plugin `console.*` output is not captured there on
+  2.0.x).
 
 ## Verified headless (2026-10-15, opencode 2.0.29)
 
@@ -48,13 +45,15 @@ Where to look:
 - [x] **MCP registration**: hosted URL received initialize/tools-list
   requests with `lunaroute-api-key` + attribution headers.
 - [x] **Unit suite**: `npm run check` green.
-
-## Pending (need a TTY / browser / real key)
-
 - [x] **TUI plugin loads** (2026-10-15, TTY via `script`): `/lunaroute`
   renders the settings list + Refresh models; toggling Hosted MCP wrote
   `lunaroute.json` and showed `mcp = off · applied`. TUI features are
   reported by `/api/plugin` (`server + tui`).
+- [x] **Published tarball** (2026-10-15): `npm pack` + `file:<tarball>`
+  install loads with `features: {server, tui}` and status active.
+
+## Pending (need a TTY / browser / real key — run before the next release)
+
 - [ ] **Browser (auto) OAuth**: `/connect` → LunaRoute → Log in with browser;
   approving in the browser completes without pasting.
 - [ ] **First-class tools end-to-end**: with a real key, `web_search`
@@ -64,8 +63,6 @@ Where to look:
   with the three methods.
 - [ ] **Logout/account switch**: switching accounts updates models, MCP
   headers, and tools after the credential event.
-- [x] **Published tarball** (2026-10-15): `npm pack` + `file:<tarball>`
-  install loads with `features: {server, tui}` and status active.
 - [ ] **OpenCode 1.x pin**: `@lunaroute/opencode-extension@0.3.1` still
   installs and loads on 1.18.30.
 
@@ -101,3 +98,17 @@ the unit tests (`tests/provider.test.ts`), not by this run.*
   the gateway and surfaced `Provider request failed with HTTP 501` as a normal error; no
   crash.
 - [x] **Logged out** -> exactly one `lunaroute/login` model (credential row deactivated).
+## Release record (machine-checked)
+
+The release commit — the commit the `v*` tag points at — must carry a line:
+
+```
+smoke: <YYYY-MM-DD> <all-pass|exceptions>[ note...]
+```
+
+`all-pass` means every checklist item above is checked or verified; 
+`exceptions` must be followed by a short note naming each item left open
+and why. The publish workflow enforces the line's presence and shape via
+`scripts/release-tag.mjs` before `npm publish` runs; a tag whose commit
+lacks a valid smoke line fails the release. This enforcement begins with
+the first release tagged after 2026-10-16.
