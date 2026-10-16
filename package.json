@@ -29,7 +29,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm test"
+    "test:config": "node --test scripts/*.node-test.mjs",
+    "check": "npm run typecheck && npm test && npm run test:config"
   },
   "dependencies": {
     "@opencode/plugin": "2.0.29",
@@ -38,7 +39,8 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.0",
+    "yaml": "2.9.0"
   },
   "engines": {
     "opencode": ">=2.0.0"
