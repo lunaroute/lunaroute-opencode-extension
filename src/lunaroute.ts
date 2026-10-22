@@ -131,9 +131,30 @@ export function mapCatalog(entries: unknown[]): { models: MappedModel[]; skipped
 // over the full GLM 5.3, so a fresh login doesn't start on the flagship.
 export const PREFERRED_DEFAULT_MODEL_ID = "glm-5.3-flash";
 
+// One labeled placeholder keeps the provider non-empty when there is no real model to
+// list (v1 id `login`, kata 3xsy). The real catalog replaces it wholesale (kata xn2w).
+export const PLACEHOLDER_MODEL_ID = "login";
+export const LOGIN_PLACEHOLDER_NAME = "Log in with /connect";
+export const UNAVAILABLE_MODELS_NAME = "Couldn't load models — run /lunaroute → Refresh models";
+
+export function placeholderModel(name: string): MappedModel {
+  return {
+    id: PLACEHOLDER_MODEL_ID,
+    name,
+    reasoning: false,
+    tool_call: true,
+    attachment: false,
+    limitContext: DEFAULT_CONTEXT_LIMIT,
+    limitOutput: DEFAULT_OUTPUT_LIMIT,
+    modalitiesInput: ["text"],
+    variants: {},
+  };
+}
+
 export function defaultModelId(models: MappedModel[]): string | undefined {
-  if (!models.length) return undefined;
-  const preferred = models.find((m) => m.id === PREFERRED_DEFAULT_MODEL_ID);
+  const usable = models.filter((m) => m.id !== PLACEHOLDER_MODEL_ID);
+  if (!usable.length) return undefined;
+  const preferred = usable.find((m) => m.id === PREFERRED_DEFAULT_MODEL_ID);
   if (preferred) return preferred.id;
-  return [...models.map((m) => m.id)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0];
+  return [...usable.map((m) => m.id)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0];
 }
