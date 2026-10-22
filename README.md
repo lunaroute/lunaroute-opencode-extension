@@ -359,11 +359,14 @@ that the Responses default applies.
   account you can switch back from.
 - **A session shows no LunaRoute models** (or only "Couldn't load models — run
   /lunaroute → Refresh models"): the catalog could not be fetched when that
-  session's folder first loaded — the gateway was unreachable, or the key was
-  rejected. The plugin retries once, then says so instead of listing nothing.
-  Run `/lunaroute` → **Refresh models** (same as `opencode reload`) once you are
-  online: it re-fetches without restarting. A revoked key needs `/connect`
-  instead — a refresh cannot fix it.
+  session's folder first loaded — the gateway was unreachable or the key was
+  rejected — or it loaded but listed no chat model your account can use. The
+  plugin retries once, then says so instead of listing nothing (a catalog that
+  loaded before is kept, never replaced by the placeholder). Run `/lunaroute` →
+  **Refresh models** (same as `opencode reload`) once you are online: it
+  re-fetches without restarting. Still only the placeholder afterwards? Check
+  the account's available models. A revoked key needs `/connect` instead — a
+  refresh cannot fix it.
 - **Key rotation / multiple accounts**: `/connect` → LunaRoute lists saved
   accounts; new logins become active and can be renamed or deleted there.
   The plugin follows the active credential for models, MCP, and tools.

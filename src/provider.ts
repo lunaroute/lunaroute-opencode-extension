@@ -87,7 +87,10 @@ export function createLunarouteProvider(deps: ProviderDeps): {
     for (const skipped of result.skipped) {
       deps.log("warn", `LunaRoute: skipped catalog entry "${skipped.id}": ${skipped.reason}`);
     }
-    models = result.models.length > 0 ? result.models : [placeholderModel(UNAVAILABLE_MODELS_NAME)];
+    // A successful fetch that maps to nothing (temporarily empty or fully filtered
+    // catalog) must not discard a catalog the user can still use (kata xn2w).
+    if (result.models.length > 0) models = result.models;
+    else placeholderUnlessUsable(UNAVAILABLE_MODELS_NAME);
   };
 
   const buildInfo = (editor: ProviderEditorLike): Record<string, unknown> => {

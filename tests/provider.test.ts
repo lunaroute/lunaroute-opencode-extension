@@ -201,6 +201,20 @@ describe("createLunarouteProvider", () => {
     expect(added[added.length - 1].models.map((m) => m.id)).toEqual(["glm-5.3"]);
   });
 
+  it("keeps the last good catalog when a refresh comes back empty", async () => {
+    let result: CatalogResult = { models: [mapped], skipped: [] };
+    const d = deps({ fetchCatalog: vi.fn(async () => result) });
+    const provider = createLunarouteProvider(d);
+    const { ctx, added } = makeCtx();
+    await provider.register(ctx);
+
+    result = { models: [], skipped: [{ id: "embed-x", reason: "non_chat_capability (embeddings)" }] };
+    await provider.refresh(ctx);
+
+    expect(provider.getModels().map((m) => m.id)).toEqual(["glm-5.3"]);
+    expect(added[added.length - 1].models.map((m) => m.id)).toEqual(["glm-5.3"]);
+  });
+
   it("stays on the placeholder when a refresh also fails before any catalog loaded", async () => {
     const d = deps({ fetchCatalog: vi.fn(async (): Promise<CatalogResult> => ({ error: "HTTP 500" })) });
     const provider = createLunarouteProvider(d);
