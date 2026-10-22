@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 // process, since this plugin renders no JSX.
 import type { Plugin as TuiPlugin } from "@opencode/plugin/tui";
 import { applySettingChange, readSettings, writeSettings, type SettingsKey } from "./settings.js";
+import { PLACEHOLDER_MODEL_ID } from "./lunaroute.js";
 
 /** The five settings rows, with the only UI-specific text (label/summary). */
 const ROWS: readonly { key: SettingsKey; label: string; description: string }[] = [
@@ -105,7 +106,17 @@ async function refresh(context: TuiContext): Promise<void> {
     await context.client.location.reload();
     const result = await context.client.model.list();
     const models = result?.data ?? [];
-    const count = models.filter((m) => m.providerID === "lunaroute").length;
+    // The failure placeholder is not a model: counting it would report success for the
+    // very state this command exists to fix (kata xn2w).
+    const count = models.filter((m) => m.providerID === "lunaroute" && m.id !== PLACEHOLDER_MODEL_ID).length;
+    if (count === 0) {
+      context.ui.toast.show({
+        variant: "error",
+        title: "LunaRoute",
+        message: "Models reloaded — Couldn't load the LunaRoute catalog",
+      });
+      return;
+    }
     context.ui.toast.show({ variant: "success", title: "LunaRoute", message: `Models reloaded — ${count} available` });
   } catch (err) {
     context.ui.toast.show({ variant: "error", title: "LunaRoute", message: `Model refresh failed: ${messageOf(err)}` });

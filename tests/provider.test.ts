@@ -3,6 +3,7 @@ import { createLunarouteProvider, type ProviderCtxLike, type ProviderEditorLike 
 import { PACKAGE_RESPONSES } from "../src/wire.js";
 import type { CatalogResult } from "../src/models.js";
 import type { MappedModel } from "../src/lunaroute.js";
+import { LOGIN_PLACEHOLDER_NAME, UNAVAILABLE_MODELS_NAME } from "../src/lunaroute.js";
 
 const mapped: MappedModel = {
   id: "glm-5.3",
@@ -71,23 +72,24 @@ describe("createLunarouteProvider", () => {
     expect(added[0].models.map((m) => m.id)).toEqual(["glm-5.3"]);
   });
 
-  it("registers with zero models when logged out, without fetching", async () => {
+  it("registers the login placeholder when logged out, without fetching", async () => {
     const d = deps({ resolveKey: vi.fn(async () => undefined) });
     const provider = createLunarouteProvider(d);
     const { ctx, added } = makeCtx();
     await provider.register(ctx);
 
     expect(d.fetchCatalog).not.toHaveBeenCalled();
-    expect(added[0].models).toEqual([]);
+    expect(added[0].models.map((m) => m.id)).toEqual(["login"]);
+    expect(added[0].models.map((m) => (m as { name?: string }).name)).toEqual([LOGIN_PLACEHOLDER_NAME]);
   });
 
-  it("starts with zero models and warns when the catalog fetch fails", async () => {
+  it("registers the failure placeholder and warns when the catalog fetch fails", async () => {
     const d = deps({ fetchCatalog: vi.fn(async (): Promise<CatalogResult> => ({ error: "HTTP 401" })) });
     const provider = createLunarouteProvider(d);
     const { ctx, added } = makeCtx();
     await provider.register(ctx);
 
-    expect(added[0].models).toEqual([]);
+    expect(added[0].models.map((m) => (m as { name?: string }).name)).toEqual([UNAVAILABLE_MODELS_NAME]);
     expect(d.log).toHaveBeenCalledWith("warn", expect.stringContaining("catalog fetch failed: HTTP 401"));
   });
 
@@ -164,5 +166,62 @@ describe("createLunarouteProvider", () => {
     expect(reload).toHaveBeenCalledTimes(1);
     expect(added[added.length - 1].models.map((m) => m.id)).toEqual(["glm-5.3"]);
     expect(d.log).toHaveBeenCalledWith("warn", expect.stringContaining("HTTP 500"));
+  });
+  it("registers the login placeholder when the credential lookup throws", async () => {
+    const d = deps({ resolveKey: vi.fn(async () => { throw new Error("store unavailable"); }) });
+    const provider = createLunarouteProvider(d);
+    const { ctx, added } = makeCtx();
+    await provider.register(ctx);
+
+    expect(added[0].models.map((m) => (m as { name?: string }).name)).toEqual([LOGIN_PLACEHOLDER_NAME]);
+    expect(d.log).toHaveBeenCalledWith("warn", expect.stringContaining("store unavailable"));
+  });
+
+  it("registers the failure placeholder when the catalog maps to zero models", async () => {
+    const d = deps({ fetchCatalog: vi.fn(async (): Promise<CatalogResult> => ({ models: [], skipped: [{ id: "embed-x", reason: "non_chat_capability (embeddings)" }] })) });
+    const provider = createLunarouteProvider(d);
+    const { ctx, added } = makeCtx();
+    await provider.register(ctx);
+
+    expect(added[0].models.map((m) => (m as { name?: string }).name)).toEqual([UNAVAILABLE_MODELS_NAME]);
+  });
+
+  it("replaces the placeholder with the real catalog once a fetch succeeds", async () => {
+    let result: CatalogResult = { error: "HTTP 500" };
+    const d = deps({ fetchCatalog: vi.fn(async () => result) });
+    const provider = createLunarouteProvider(d);
+    const { ctx, added } = makeCtx();
+    await provider.register(ctx);
+    expect(provider.getModels().map((m) => m.id)).toEqual(["login"]);
+
+    result = { models: [mapped], skipped: [] };
+    await provider.refresh(ctx);
+
+    expect(provider.getModels().map((m) => m.id)).toEqual(["glm-5.3"]);
+    expect(added[added.length - 1].models.map((m) => m.id)).toEqual(["glm-5.3"]);
+  });
+
+  it("keeps the last good catalog when a refresh comes back empty", async () => {
+    let result: CatalogResult = { models: [mapped], skipped: [] };
+    const d = deps({ fetchCatalog: vi.fn(async () => result) });
+    const provider = createLunarouteProvider(d);
+    const { ctx, added } = makeCtx();
+    await provider.register(ctx);
+
+    result = { models: [], skipped: [{ id: "embed-x", reason: "non_chat_capability (embeddings)" }] };
+    await provider.refresh(ctx);
+
+    expect(provider.getModels().map((m) => m.id)).toEqual(["glm-5.3"]);
+    expect(added[added.length - 1].models.map((m) => m.id)).toEqual(["glm-5.3"]);
+  });
+
+  it("stays on the placeholder when a refresh also fails before any catalog loaded", async () => {
+    const d = deps({ fetchCatalog: vi.fn(async (): Promise<CatalogResult> => ({ error: "HTTP 500" })) });
+    const provider = createLunarouteProvider(d);
+    const { ctx } = makeCtx();
+    await provider.register(ctx);
+    await provider.refresh(ctx);
+
+    expect(provider.getModels().map((m) => m.id)).toEqual(["login"]);
   });
 });

@@ -1,7 +1,13 @@
 import { Provider } from "@opencode/plugin";
 import type { CatalogResult } from "./models.js";
 import type { MappedModel } from "./lunaroute.js";
-import { LUNAROUTE_PROVIDER } from "./lunaroute.js";
+import {
+  LUNAROUTE_PROVIDER,
+  LOGIN_PLACEHOLDER_NAME,
+  PLACEHOLDER_MODEL_ID,
+  UNAVAILABLE_MODELS_NAME,
+  placeholderModel,
+} from "./lunaroute.js";
 import { toModelInfo } from "./model-info.js";
 import type { WirePackage } from "./wire.js";
 
@@ -47,8 +53,17 @@ export function createLunarouteProvider(deps: ProviderDeps): {
   getModels(): MappedModel[];
 } {
   // Last catalog that loaded successfully. A failed refresh keeps it (v1's
-  // availability policy: never wipe models the user can still use).
+  // availability policy: never wipe models the user can still use); when nothing
+  // usable ever loaded, the catalog is replaced by one labeled placeholder so the
+  // failure is visible in /models instead of an empty provider (kata xn2w).
   let models: MappedModel[] = [];
+
+  const hasUsable = (): boolean => models.some((m) => m.id !== PLACEHOLDER_MODEL_ID);
+
+  /** Keep a catalog we already have; otherwise make the failure visible. */
+  const placeholderUnlessUsable = (name: string): void => {
+    if (!hasUsable()) models = [placeholderModel(name)];
+  };
 
   const load = async (): Promise<void> => {
     let key: string | undefined;
@@ -56,21 +71,26 @@ export function createLunarouteProvider(deps: ProviderDeps): {
       key = await deps.resolveKey();
     } catch (err) {
       deps.log("warn", `LunaRoute: credential lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+      placeholderUnlessUsable(LOGIN_PLACEHOLDER_NAME);
       return;
     }
     if (!key) {
-      models = [];
+      models = [placeholderModel(LOGIN_PLACEHOLDER_NAME)];
       return;
     }
     const result = await deps.fetchCatalog(deps.routingUrl, key);
     if ("error" in result) {
       deps.log("warn", `LunaRoute: catalog fetch failed: ${result.error}`);
+      placeholderUnlessUsable(UNAVAILABLE_MODELS_NAME);
       return;
     }
     for (const skipped of result.skipped) {
       deps.log("warn", `LunaRoute: skipped catalog entry "${skipped.id}": ${skipped.reason}`);
     }
-    models = result.models;
+    // A successful fetch that maps to nothing (temporarily empty or fully filtered
+    // catalog) must not discard a catalog the user can still use (kata xn2w).
+    if (result.models.length > 0) models = result.models;
+    else placeholderUnlessUsable(UNAVAILABLE_MODELS_NAME);
   };
 
   const buildInfo = (editor: ProviderEditorLike): Record<string, unknown> => {

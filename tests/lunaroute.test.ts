@@ -5,6 +5,8 @@ import {
   computePkceChallenge, generatePkceVerifier, generateSessionId,
   generateState, isValidCredentialShape, parseCallbackQuery,
   mapCatalog, mapCatalogEntry, defaultModelId, NON_CHAT_CAPABILITIES,
+  placeholderModel, PLACEHOLDER_MODEL_ID, UNAVAILABLE_MODELS_NAME, LOGIN_PLACEHOLDER_NAME,
+  DEFAULT_CONTEXT_LIMIT, DEFAULT_OUTPUT_LIMIT,
   type MappedModel,
 } from "../src/lunaroute.js";
 
@@ -199,4 +201,25 @@ describe("defaultModelId", () => {
     expect(defaultModelId([mk("glm-5.3"), mk("glm-5.3-flash"), mk("a-model")])).toBe("glm-5.3-flash");
   });
   it("returns undefined when empty", () => expect(defaultModelId([])).toBeUndefined());
+});
+
+describe("placeholder model", () => {
+  it("builds one labeled placeholder with the v1 id and the repo limit defaults", () => {
+    const p = placeholderModel(UNAVAILABLE_MODELS_NAME);
+    expect(p.id).toBe("login");
+    expect(p.name).toBe("Couldn't load models — run /lunaroute → Refresh models");
+    expect(p.tool_call).toBe(true);
+    expect(p.reasoning).toBe(false);
+    expect(p.limitContext).toBe(DEFAULT_CONTEXT_LIMIT);
+    expect(p.limitOutput).toBe(DEFAULT_OUTPUT_LIMIT);
+    expect(p.variants).toEqual({});
+    expect(PLACEHOLDER_MODEL_ID).toBe("login");
+    expect(LOGIN_PLACEHOLDER_NAME).toBe("Log in with /connect");
+  });
+
+  it("defaultModelId never picks the placeholder", () => {
+    const mk = (id: string): MappedModel => ({ id, name: id, reasoning: false, tool_call: true, attachment: false, limitContext: 1, limitOutput: 1, modalitiesInput: ["text"], variants: {} });
+    expect(defaultModelId([placeholderModel(UNAVAILABLE_MODELS_NAME)])).toBeUndefined();
+    expect(defaultModelId([placeholderModel(UNAVAILABLE_MODELS_NAME), mk("glm-5.3")])).toBe("glm-5.3");
+  });
 });

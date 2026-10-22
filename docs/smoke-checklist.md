@@ -79,3 +79,25 @@ The v2 plugin API is version-locked and young. On every opencode update:
   with `Authorization` + attribution headers (upstream issues
   anomalyco/opencode#51802 / #42856 watch: plugin-added providers must
   materialize).
+
+## Catalog-fetch resilience (kata xn2w)
+
+*Verified 2026-10-22 on opencode 2.1.2 (sandboxed HOME, worktree plugin entry, stub
+gateway). The TUI/CLI print model ids only, so the placeholder's display name is pinned by
+the unit tests (`tests/provider.test.ts`), not by this run.*
+
+- [x] **Gateway down at first load** -> exactly one `lunaroute/login` model (was an empty
+  provider before this change); `opencode serve` stdout carries
+  `LunaRoute: catalog fetch failed: HTTP 500` (not `opencode.log`).
+- [x] **Placeholder replaced, not merged** -> after the gateway recovered,
+  `opencode reload` left only `lunaroute/glm-5.3` + `lunaroute/glm-5.3-flash`;
+  `lunaroute/login` was gone. `editor.add` replaces the provider's model set, so no
+  explicit removal is needed.
+- [x] **No auto-pick of the placeholder** -> with no default model set and a failing
+  catalog, `opencode run` resolved `build · flint-40b-free` (an OpenCode model), never
+  `lunaroute/login`; the auto-pick after a *successful* reload logged
+  `set lunaroute/glm-5.3-flash as the default model`.
+- [x] **Placeholder is usable-shaped** -> `opencode run --model lunaroute/login` reached
+  the gateway and surfaced `Provider request failed with HTTP 501` as a normal error; no
+  crash.
+- [x] **Logged out** -> exactly one `lunaroute/login` model (credential row deactivated).

@@ -9,7 +9,17 @@ type DialogOptions = { options: { value: string }[] };
 type Toast = { variant?: string; message: string };
 type Command = { id: string; slash: { name: string }; run: () => Promise<void> };
 
-function fakeContext(responder: (opts: DialogOptions) => string | undefined) {
+type ListModel = { providerID: string; id?: string };
+const DEFAULT_MODELS: ListModel[] = [
+  { providerID: "lunaroute", id: "glm-5.3" },
+  { providerID: "opencode", id: "beam-free" },
+  { providerID: "lunaroute", id: "glm-5.4" },
+];
+
+function fakeContext(
+  responder: (opts: DialogOptions) => string | undefined,
+  models: ListModel[] = DEFAULT_MODELS,
+) {
   const commands: Command[] = [];
   const selects: DialogOptions[] = [];
   const toasts: Toast[] = [];
@@ -32,9 +42,7 @@ function fakeContext(responder: (opts: DialogOptions) => string | undefined) {
     client: {
       location: { reload },
       model: {
-        list: async () => ({
-          data: [{ providerID: "lunaroute" }, { providerID: "opencode" }, { providerID: "lunaroute" }],
-        }),
+        list: async () => ({ data: models }),
       },
     },
   };
@@ -106,6 +114,15 @@ describe("/lunaroute v2 TUI plugin", () => {
 
     expect(reload).toHaveBeenCalledTimes(1);
     expect(String(toasts.at(-1)?.message)).toBe("Models reloaded — 2 available");
+  });
+
+  it("refresh: reports a failure when only the placeholder came back", async () => {
+    const { context, commands, toasts } = fakeContext(() => "__refresh", [{ providerID: "lunaroute", id: "login" }]);
+    await tui.setup(context as never);
+    await commands[0].run();
+
+    expect(toasts.at(-1)).toMatchObject({ variant: "error" });
+    expect(String(toasts.at(-1)?.message)).toContain("Couldn't load");
   });
 
   it("cancelled selection does nothing", async () => {
