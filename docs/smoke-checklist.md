@@ -79,3 +79,17 @@ The v2 plugin API is version-locked and young. On every opencode update:
   with `Authorization` + attribution headers (upstream issues
   anomalyco/opencode#51802 / #42856 watch: plugin-added providers must
   materialize).
+
+## Catalog-fetch resilience (kata xn2w)
+
+- [ ] **Gateway down at first load** -> exactly one `lunaroute/login` model named
+  "Couldn't load models — run /lunaroute → Refresh models"; the server stdout carries
+  `LunaRoute: catalog fetch failed: …` (not `opencode.log`).
+- [ ] **Placeholder replaced, not merged** -> after the gateway recovers, Refresh models
+  leaves only real models (`lunaroute/login` gone).
+- [ ] **No auto-pick of the placeholder** -> with no default model set and a failed
+  catalog, starting a session (TUI and `opencode run`) does not silently run
+  `lunaroute/login`.
+- [ ] **Placeholder is usable-shaped** -> select it and send a prompt: the gateway answers
+  with a normal model error, the TUI reports it, nothing crashes.
+- [ ] **Logged out** -> one `lunaroute/login` model named "Log in with /connect".

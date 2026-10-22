@@ -38,6 +38,9 @@ on the frozen 0.3.1 line.
 2. TUI port + `models-refresh` in scope.
 3. No placeholder model. v2 `/connect` lists integrations, not models; verify zero-model
    provider visibility in the login spike.
+   *Superseded 2026-10-22 by kata xn2w — see
+   [2026-10-22-catalog-fetch-failure-design.md](./2026-10-22-catalog-fetch-failure-design.md):
+   a zero-model provider is invisible in `/models`, so a labeled placeholder returns.*
 4. Logging sink: `console.*`; verify capture in `opencode.log` during the spike.
 5. Integration id **must be `lunaroute`** (legacy `auth.json` import verified to land under
    exactly this id, keeping existing logins).
