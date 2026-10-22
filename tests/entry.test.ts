@@ -115,14 +115,14 @@ describe("lunaroute v2 entry", () => {
     const { ctx, providerAdded, methods, hooks, mcpSet, toolAdded } = makeCtx();
     const cleanup = await lunaroute.setup(ctx as never);
 
-    // provider: stub only, zero models while logged out
+    // provider: stub + the logged-out placeholder (kata xn2w)
     expect(providerAdded).toHaveLength(1);
     expect(providerAdded[0].info).toMatchObject({
       id: "lunaroute",
       integrationID: "lunaroute",
       name: "LunaRoute",
     });
-    expect(providerAdded[0].models).toEqual([]);
+    expect(providerAdded[0].models.map((m) => (m as { id?: string }).id)).toEqual(["login"]);
 
     // integration: key + browser + remote
     expect(methods.map((m) => (m.method as { type: string }).type)).toEqual(["oauth", "oauth", "key"]);
