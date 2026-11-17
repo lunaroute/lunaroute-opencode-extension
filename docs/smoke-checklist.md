@@ -21,6 +21,9 @@ Where to look:
   `source: opencode`.
 - **Staging MCP server logs**: `LUNAROUTE-API-KEY` header + `lunaroute-agent`
   + session id on MCP requests.
+- **Project attribution**: with a `.lunaroute.json` at the repo root, gateway
+  and MCP logs carry `LUNAROUTE-PROJECT-ID` with that value; without the file
+  the header is absent.
 - **Server log**: `~/.local/share/opencode/log/opencode.log` (plugin load
   lines; note that plugin `console.*` output is not captured there on 2.0.x).
 
@@ -68,6 +71,12 @@ Where to look:
   install loads with `features: {server, tui}` and status active.
 - [ ] **OpenCode 1.x pin**: `@lunaroute/opencode-extension@0.3.1` still
   installs and loads on 1.18.30.
+- [ ] **`/lunaroute project`** (kata zarw): from a git repo, `/lunaroute project
+  test-label` writes `.lunaroute.json`, toasts the path, and the next chat
+  request plus a hosted-MCP tool call carry `LUNAROUTE-PROJECT-ID: test-label`;
+  `project clear` removes it. Launch from a subdirectory and confirm the label
+  is still picked up (walk-up to `.git`). Also confirm bare `/lunaroute` still
+  opens the settings dialog now that the command takes arguments.
 
 ## Per-openCode-bump regression (cheap)
 
