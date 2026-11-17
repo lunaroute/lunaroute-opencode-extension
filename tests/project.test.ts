@@ -110,7 +110,8 @@ describe("projectState", () => {
   it("reports a missing file and a cleared file as none", () => {
     expect(projectState(ROOT, fakeIo()).kind).toBe("none");
     expect(projectState(ROOT, bytesIo("{}\n")).kind).toBe("none");
-    expect(projectState(ROOT, bytesIo('{"other":1}')).kind).toBe("none");
+    expect(projectState(ROOT, bytesIo('{"other":1}')).kind).toBe("invalid");
+    expect(projectState(ROOT, bytesIo('{"proejct":"lunaroute-web"}')).kind).toBe("invalid");
   });
 
   it("reports the value when one is set", () => {

@@ -114,11 +114,15 @@ export default Plugin.define({
     await ctx.session.hook(
       "model.request",
       (event) => {
-        // Exactly one spelling reaches the wire, whatever the host already set.
-        for (const key of Object.keys(event.headers)) {
-          if (key.toLowerCase() === PROJECT_HEADER.toLowerCase()) delete event.headers[key];
+        const project = readProject(projectRoot);
+        if (project !== undefined) {
+          // A valid repo project wins over any spelling already on the request,
+          // so exactly one reaches the wire. Unset leaves the host's value alone.
+          for (const key of Object.keys(event.headers)) {
+            if (key.toLowerCase() === PROJECT_HEADER.toLowerCase()) delete event.headers[key];
+          }
         }
-        Object.assign(event.headers, buildAttributionHeaders(sessionId), projectHeaders(readProject(projectRoot)));
+        Object.assign(event.headers, buildAttributionHeaders(sessionId), projectHeaders(project));
       },
       { providerID: LUNAROUTE_PROVIDER },
     );

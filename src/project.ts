@@ -62,8 +62,13 @@ function readProjectBytes(path: string): Uint8Array {
       throw new Error("not a readable project file");
     }
     const buffer = Buffer.allocUnsafe(Math.min(stat.size, MAX_PROJECT_FILE_BYTES));
-    const n = readSync(fd, buffer, 0, buffer.length, 0);
-    return buffer.subarray(0, n);
+    let total = 0;
+    while (total < buffer.length) {
+      const n = readSync(fd, buffer, total, buffer.length - total, total);
+      if (n === 0) break; // EOF: a short read is legitimate, truncation is not
+      total += n;
+    }
+    return buffer.subarray(0, total);
   } finally {
     closeSync(fd);
   }
@@ -143,7 +148,11 @@ export function projectState(root: string, io: ProjectIo = defaultProjectIo): Pr
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { kind: "invalid" };
   const value = (parsed as Record<string, unknown>).project;
-  if (value === undefined) return { kind: "none" }; // what clearProject leaves behind
+  if (value === undefined) {
+    // Only the empty object clearProject writes means "not set": a hand-edited
+    // file with a typo'd key must not read as never-set.
+    return Object.keys(parsed as Record<string, unknown>).length === 0 ? { kind: "none" } : { kind: "invalid" };
+  }
   if (typeof value !== "string") return { kind: "invalid" };
   const result = validateProjectName(value);
   return result.ok ? { kind: "set", name: result.name } : { kind: "invalid" };

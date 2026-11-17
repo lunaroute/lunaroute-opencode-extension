@@ -149,6 +149,12 @@ describe("lunaroute v2 entry", () => {
       "x-lunaroute-session",
     ]);
 
+    // with no repo project, a host-supplied value is left exactly as it was
+    const hostSet = { headers: { "Lunaroute-Project-Id": "host-value" } as Record<string, string> };
+    hooks[0].cb(hostSet);
+    expect(hostSet.headers["Lunaroute-Project-Id"]).toBe("host-value");
+    expect(Object.keys(hostSet.headers).filter((k) => k.toLowerCase() === "lunaroute-project-id")).toHaveLength(1);
+
     // a project file written after setup is read per request (hand edits live)
     writeFileSync(join(directory, ".lunaroute.json"), '{"project":"lunaroute-web"}\n');
     const withProject = { headers: {} as Record<string, string> };
