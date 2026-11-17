@@ -11,6 +11,7 @@ import {
 } from "./lunaroute.js";
 import { fetchCatalog } from "./models.js";
 import { createLunarouteProvider, type ProviderCtxLike } from "./provider.js";
+import { PROJECT_HEADER, findProjectRoot, projectHeaders, readProject } from "./project.js";
 import {
   createCredentialReader,
   createLunarouteIntegration,
@@ -53,6 +54,9 @@ export default Plugin.define({
   async setup(ctx) {
     const env = process.env;
     const home = homedir();
+    // One resolver for the whole plugin: the TUI plugin runs the same function
+    // on the same location directory, so reads and writes agree (kata zarw).
+    const projectRoot = findProjectRoot(ctx.location.directory);
     const sessionId = generateSessionId();
     const routingUrl = resolveRoutingUrl(env);
     const mcpUrl = resolveMcpUrl(env);
@@ -110,7 +114,15 @@ export default Plugin.define({
     await ctx.session.hook(
       "model.request",
       (event) => {
-        Object.assign(event.headers, buildAttributionHeaders(sessionId));
+        const project = readProject(projectRoot);
+        if (project !== undefined) {
+          // A valid repo project wins over any spelling already on the request,
+          // so exactly one reaches the wire. Unset leaves the host's value alone.
+          for (const key of Object.keys(event.headers)) {
+            if (key.toLowerCase() === PROJECT_HEADER.toLowerCase()) delete event.headers[key];
+          }
+        }
+        Object.assign(event.headers, buildAttributionHeaders(sessionId), projectHeaders(project));
       },
       { providerID: LUNAROUTE_PROVIDER },
     );
@@ -121,6 +133,7 @@ export default Plugin.define({
       sessionId,
       log,
       enabled: () => mcpEnabled(settingsNow()),
+      project: () => readProject(projectRoot),
     });
     await mcp.register(ctx as unknown as McpCtxLike, await reader());
 
@@ -153,6 +166,7 @@ export default Plugin.define({
               log,
               resolveKey: resolveAuth,
               readSettingsNow: settingsNow,
+              readProject: () => readProject(projectRoot),
               descriptors,
             })
           : Promise.resolve({}),
@@ -165,6 +179,7 @@ export default Plugin.define({
               log,
               resolveKey: resolveAuth,
               readSettingsNow: settingsNow,
+              readProject: () => readProject(projectRoot),
               descriptors,
             })
           : Promise.resolve({}),
@@ -177,6 +192,7 @@ export default Plugin.define({
               log,
               resolveKey: resolveAuth,
               readSettingsNow: settingsNow,
+              readProject: () => readProject(projectRoot),
               descriptors,
             })
           : Promise.resolve({}),

@@ -1,4 +1,5 @@
 import { buildAttributionHeaders, LUNAROUTE_PROVIDER } from "./lunaroute.js";
+import { projectHeaders } from "./project.js";
 
 /**
  * v2 MCP registration (kata 4qqn) — the `config` hook's MCP contributor
@@ -58,11 +59,11 @@ export function normalizedUrlIdentity(value: unknown): string | undefined {
   }
 }
 
-export function buildMcpServer(key: string, mcpUrl: string, sessionId: string): McpServerLike {
+export function buildMcpServer(key: string, mcpUrl: string, sessionId: string, project?: string): McpServerLike {
   return {
     type: "remote",
     url: mcpUrl,
-    headers: { "LUNAROUTE-API-KEY": key, ...buildAttributionHeaders(sessionId) },
+    headers: { "LUNAROUTE-API-KEY": key, ...buildAttributionHeaders(sessionId), ...projectHeaders(project) },
     oauth: false,
     disabled: false,
   };
@@ -75,6 +76,10 @@ export function createLunarouteMcp(opts: {
   /** Settings gate, read inside the transform so a replay (refresh or a
    * location reload after a settings change) honors the current file. */
   enabled?: () => boolean;
+  /** Repo project label, read inside the transform: the host owns the MCP
+   * client, so this seam only follows on the next transform or reload
+   * (kata zarw). */
+  project?: () => string | undefined;
 }): {
   register(ctx: McpCtxLike, key: string | undefined): Promise<void>;
   refresh(ctx: McpCtxLike, key: string | undefined): Promise<void>;
@@ -106,7 +111,7 @@ export function createLunarouteMcp(opts: {
         opts.log("info", "LunaRoute: user-defined mcp.lunaroute in effect; rotate by editing it or removing it");
         return;
       }
-      editor.set(LUNAROUTE_PROVIDER, buildMcpServer(key, opts.mcpUrl, opts.sessionId));
+      editor.set(LUNAROUTE_PROVIDER, buildMcpServer(key, opts.mcpUrl, opts.sessionId, opts.project?.()));
     });
   };
 

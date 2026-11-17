@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import lunaroute from "../src/index.js";
 
 type Hook = { name: string; cb: (event: unknown) => void; opts: unknown };
@@ -42,7 +45,7 @@ function makeEventStream() {
   };
 }
 
-function makeCtx(auth?: { key: string }) {
+function makeCtx(auth?: { key: string }, directory = mkdtempSync(join(tmpdir(), "lr-entry-"))) {
   const providerAdded: { info: Record<string, unknown>; models: unknown[] }[] = [];
   const methods: Record<string, unknown>[] = [];
   const hooks: Hook[] = [];
@@ -53,6 +56,7 @@ function makeCtx(auth?: { key: string }) {
   const events = makeEventStream();
 
   const ctx = {
+    location: { directory },
     provider: {
       transform: async (cb: (editor: unknown) => void) => cb({ get: () => undefined, add: (input: never) => void providerAdded.push(input) }),
       reload: reloads.provider,
@@ -102,7 +106,7 @@ function makeCtx(auth?: { key: string }) {
       },
     },
   };
-  return { ctx, providerAdded, methods, hooks, mcpSet, toolAdded, modelCallbacks, reloads, events };
+  return { ctx, directory, providerAdded, methods, hooks, mcpSet, toolAdded, modelCallbacks, reloads, events };
 }
 
 describe("lunaroute v2 entry", () => {
@@ -112,7 +116,7 @@ describe("lunaroute v2 entry", () => {
   });
 
   it("registers provider, integration methods, attribution hook, MCP, and tools; returns cleanup", async () => {
-    const { ctx, providerAdded, methods, hooks, mcpSet, toolAdded } = makeCtx();
+    const { ctx, directory, providerAdded, methods, hooks, mcpSet, toolAdded } = makeCtx();
     const cleanup = await lunaroute.setup(ctx as never);
 
     // provider: stub + the logged-out placeholder (kata xn2w)
@@ -135,6 +139,34 @@ describe("lunaroute v2 entry", () => {
     hooks[0].cb(event);
     expect(event.headers["lunaroute-agent"]).toBe("opencode");
     expect(event.headers["lunaroute-session-id"]).toBeTruthy();
+
+    // no project file: the header set is exactly today's
+    const plain = { headers: {} as Record<string, string> };
+    hooks[0].cb(plain);
+    expect(Object.keys(plain.headers).sort()).toEqual([
+      "lunaroute-agent",
+      "lunaroute-session-id",
+      "x-lunaroute-session",
+    ]);
+
+    // with no repo project, a host-supplied value is left exactly as it was
+    const hostSet = { headers: { "Lunaroute-Project-Id": "host-value" } as Record<string, string> };
+    hooks[0].cb(hostSet);
+    expect(hostSet.headers["Lunaroute-Project-Id"]).toBe("host-value");
+    expect(Object.keys(hostSet.headers).filter((k) => k.toLowerCase() === "lunaroute-project-id")).toHaveLength(1);
+
+    // a project file written after setup is read per request (hand edits live)
+    writeFileSync(join(directory, ".lunaroute.json"), '{"project":"lunaroute-web"}\n');
+    const withProject = { headers: {} as Record<string, string> };
+    hooks[0].cb(withProject);
+    expect(withProject.headers["LUNAROUTE-PROJECT-ID"]).toBe("lunaroute-web");
+    expect(withProject.headers["lunaroute-agent"]).toBe("opencode");
+
+    // a differently-cased header already present leaves one spelling only
+    const cased = { headers: { "lunaroute-project-id": "stale" } as Record<string, string> };
+    hooks[0].cb(cased);
+    expect(cased.headers["LUNAROUTE-PROJECT-ID"]).toBe("lunaroute-web");
+    expect(Object.keys(cased.headers).filter((k) => k.toLowerCase() === "lunaroute-project-id")).toHaveLength(1);
 
     // logged out: no MCP entry, no tools, default model untouched
     expect(mcpSet).toHaveLength(0);

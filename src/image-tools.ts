@@ -6,6 +6,7 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AuthResolution } from "./mcp.js";
 import { buildAttributionHeaders } from "./lunaroute.js";
+import { projectHeaders } from "./project.js";
 import { imageToolsEnabled, type LunarouteSettings } from "./settings.js";
 import {
   createLunarouteMcpClient,
@@ -601,6 +602,9 @@ export interface ImageToolMapDeps {
   log?: (level: "info" | "warn", message: string) => void;
   resolveKey: () => Promise<AuthResolution>;
   readSettingsNow: () => LunarouteSettings;
+  /** Repo project label, read per call so a hand edit or a command reaches
+   * already-registered tools without a reload (kata zarw). Absent = today. */
+  readProject?: () => string | undefined;
   /** Pre-fetched tools/list descriptors (the shared probe in index.ts). */
   descriptors?: { name: string; inputSchema?: unknown }[];
   io?: ImageIo;
@@ -632,6 +636,7 @@ export async function buildImageToolMap(deps: ImageToolMapDeps): Promise<Record<
   const headers = (key: string): Record<string, string> => ({
     "LUNAROUTE-API-KEY": key,
     ...buildAttributionHeaders(deps.sessionId),
+    ...projectHeaders(deps.readProject?.()),
   });
   const fetchImpl = deps.fetchImpl ?? (fetch as FetchLike);
 

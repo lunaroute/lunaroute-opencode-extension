@@ -368,6 +368,21 @@ describe("web_search execute", () => {
     return { map, server, deps };
   };
 
+  it("tags the tool call with the repo project when one is set (kata zarw)", async () => {
+    const { map, server } = await build(
+      { tools: ["web_search"], callResult: () => ({ content: [{ type: "text", text: searchPayload("q") }] }) },
+      { readProject: () => "lunaroute-web" },
+    );
+    await map.web_search.execute({ query: "q" }, ctx());
+    expect(callBodies(server.calls, "tools/call")[0].headers["LUNAROUTE-PROJECT-ID"]).toBe("lunaroute-web");
+  });
+
+  it("omits the project header when no project is set", async () => {
+    const { map, server } = await build({ tools: ["web_search"], callResult: () => ({ content: [{ type: "text", text: searchPayload("q") }] }) });
+    await map.web_search.execute({ query: "q" }, ctx());
+    expect("LUNAROUTE-PROJECT-ID" in callBodies(server.calls, "tools/call")[0].headers).toBe(false);
+  });
+
   it("hits the hosted MCP with the lr_ key + attribution headers; query/count on the wire", async () => {
     const { map, server } = await build({ tools: ["web_search"], callResult: () => ({ content: [{ type: "text", text: searchPayload("q") }] }) });
     const result = await map.web_search.execute({ query: "q", count: 5 }, ctx());

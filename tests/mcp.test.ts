@@ -117,6 +117,26 @@ describe("createLunarouteMcp", () => {
   });
 });
 
+describe("project attribution (kata zarw)", () => {
+  it("tags the registered server with the project read at transform time", async () => {
+    let current: string | undefined = "lunaroute-web";
+    const { ctx, setCalls, reload } = makeCtx();
+    const mcp = createLunarouteMcp(opts({ project: () => current }));
+    await mcp.register(ctx, "lr_key");
+    expect(setCalls[0].config.headers["LUNAROUTE-PROJECT-ID"]).toBe("lunaroute-web");
+
+    current = "lunaroute-api";
+    await reload(); // a re-transform picks up the change without a restart
+    expect(setCalls.at(-1)?.config.headers["LUNAROUTE-PROJECT-ID"]).toBe("lunaroute-api");
+  });
+
+  it("omits the header entirely when no project is set", async () => {
+    const { ctx, setCalls } = makeCtx();
+    await createLunarouteMcp(opts({ project: () => undefined })).register(ctx, "lr_key");
+    expect("LUNAROUTE-PROJECT-ID" in setCalls[0].config.headers).toBe(false);
+  });
+});
+
 describe("normalizedUrlIdentity / buildMcpServer", () => {
   it("ignores trailing slashes and query strings, keeps scheme+host", () => {
     expect(normalizedUrlIdentity({ url: "https://mcp.example/mcp/" })).toBe("https://mcp.example/mcp");
