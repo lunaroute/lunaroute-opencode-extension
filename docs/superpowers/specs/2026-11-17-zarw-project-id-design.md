@@ -34,8 +34,9 @@ records only what differs and the decisions made here.
   (`web_search`/`web_fetch`, image, convert) carry the header.
 - A repo with no project file sends today's headers byte-for-byte.
 - A hand edit to `.lunaroute.json` takes effect on the next model request and
-  the next tool call, with no restart — that is the headless story
-  (README:197: no TUI, the file is the interface).
+  the next first-class tool call, with no restart — that is the headless story
+  (README:197: no TUI, the file is the interface). Hosted-MCP picks it up on the
+  next transform or reload (§2).
 
 ## Non-goals
 
@@ -112,6 +113,11 @@ records only what differs and the decisions made here.
   branch on `location.project.directory` (unverified semantics, and the TUI has
   no such field — two resolvers that disagree would silently write one file and
   read another).
+- **Non-git directories:** with no `.git` ancestor the root is the launch
+  directory, so the file is written there and applies only when the location is
+  opened from that directory (or below it, via the walk-up). The command reports
+  the path it wrote; the README line says so. Read and write agree by
+  construction because both call this one resolver.
 - File `<root>/.lunaroute.json`, `{"project": "<name>"}`.
 - `readProject(root, io)`: tolerant — missing file, unreadable file, bad JSON,
   wrong shape, invalid name ⇒ `undefined`, never throws. Bounded read: 4096
@@ -125,8 +131,10 @@ records only what differs and the decisions made here.
 - `validateProjectName(raw)`: trim; 1..128 printable ASCII; reject the reserved
   command words `clear` and `off` (case-insensitive) so a project can be
   addressed again once set; reject `{` and `}` (OpenCode's config substitution
-  delimiters — see Trust model). pi's `$` rejection is **not** copied: it
-  guarded pi's own `$VAR` expansion, which does not exist here.
+  delimiters — see Trust model). pi rejects neither `$` nor `!`: it validates
+  shape only and keeps the value out of config, where `$VAR` would expand. There
+  is nothing to port, and nothing to add — this value never reaches provider
+  config either.
 - `projectHeaders(project)`: `{}` when unset or invalid, so spreading it leaves
   an unset request byte-identical to today; otherwise the literal pair.
 - Injectable io seam, same shape/spirit as `SettingsIo` (`src/settings.ts:55`) —
@@ -162,9 +170,13 @@ In `src/tui.ts`, beside the settings rows:
   `project` opens the prompt. Anything else falls through to today's menu.
 - Bare `/lunaroute project`: `ui.dialog.prompt({ value: current ?? folderName })`
   (a placeholder carries the other candidate), then report the effective value
-  **and** the file path. Cancel writes nothing.
-- A `Project — <current | (none)>` row in the `/lunaroute` menu that opens the
-  same prompt. This is the visibility counterweight: a committed label takes
+  **and** the file path. Cancel writes nothing. When the file exists but does
+  not validate, report `(invalid file at <path>)`, not `(none)` — that is the
+  difference between "never set" and "set but silently ignored", and a silent
+  drop back to the default bucket is the one failure a user cannot diagnose
+  (the settings file gets an `onInvalid` warning for the same class).
+- A `Project — <current | (none) | (invalid file at <path>)>` row in the
+  `/lunaroute` menu that opens the same prompt. This is the visibility counterweight: a committed label takes
   effect for anyone who clones the repo, and with no captured console output the
   menu row is the default place it can be seen.
 - `context.location === undefined` ⇒ error toast ("cannot determine the
@@ -172,6 +184,11 @@ In `src/tui.ts`, beside the settings rows:
   Success ⇒ toast the file path, then `location.reload()`.
 - No "unknown option" message exists here today (`src/tui.ts` is a pure select
   dialog) — the parse and its error toast are new code.
+- Edge cases, stated so they are not accidents: the name is the trimmed
+  rest-of-line after `project` (spaces allowed, validation decides); an invalid
+  name toasts `validateProjectName`'s reason and writes nothing; `clear`/`off`
+  on a repo with no file skips the write instead of committing an empty
+  `{}` file.
 - Headless: unchanged story — the file is the interface (README:197).
 
 ### 4. Trust model
@@ -198,8 +215,11 @@ Counterweight to the automatic effect is visibility, per §3.
   (temp-dir / fake-io style of `tests/settings.test.ts`): root discovery
   (`.git` directory and file), tolerant read, atomic-write failure paths,
   validation (empty, oversize, newline, non-ASCII, `{`/`}`), `projectHeaders`.
-- Existing suites: the replayed `model.request` header (`tests/entry.test.ts`
-  fake-event pattern), MCP transform before/after a change, tool-call headers,
+- Existing suites: the replayed `model.request` header and the case-insensitive
+  dedupe (seed the fake event's headers with a differently-cased
+  `lunaroute-project-id` and assert exactly one spelling reaches the wire,
+  `tests/entry.test.ts` fake-event pattern), MCP transform before/after a
+  change, tool-call headers,
   no-file ⇒ headers byte-identical to today, and the three command forms plus
   the `location: undefined` path (`tests/tui.test.ts` fake context needs
   `run(input)` and a `dialog.prompt` fake).
