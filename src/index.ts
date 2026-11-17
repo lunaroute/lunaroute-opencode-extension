@@ -162,6 +162,7 @@ export default Plugin.define({
               log,
               resolveKey: resolveAuth,
               readSettingsNow: settingsNow,
+              readProject: () => readProject(projectRoot),
               descriptors,
             })
           : Promise.resolve({}),
@@ -174,6 +175,7 @@ export default Plugin.define({
               log,
               resolveKey: resolveAuth,
               readSettingsNow: settingsNow,
+              readProject: () => readProject(projectRoot),
               descriptors,
             })
           : Promise.resolve({}),
@@ -186,6 +188,7 @@ export default Plugin.define({
               log,
               resolveKey: resolveAuth,
               readSettingsNow: settingsNow,
+              readProject: () => readProject(projectRoot),
               descriptors,
             })
           : Promise.resolve({}),

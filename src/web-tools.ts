@@ -1,5 +1,6 @@
 import { tool, type ToolDefinition } from "./tool-api.js";
 import { buildAttributionHeaders } from "./lunaroute.js";
+import { projectHeaders } from "./project.js";
 import type { AuthResolution } from "./mcp.js";
 import { resolveSearchProvider, webToolsEnabled, type LunarouteSettings } from "./settings.js";
 
@@ -407,6 +408,9 @@ export interface WebToolMapDeps {
   resolveKey: () => Promise<AuthResolution>;
   /** Fresh settings read (file = source of truth), per gate and per execute. */
   readSettingsNow: () => LunarouteSettings;
+  /** Repo project label, read per call so a hand edit or a command reaches
+   * already-registered tools without a reload (kata zarw). Absent = today. */
+  readProject?: () => string | undefined;
   /** Pre-fetched tools/list descriptors (the shared probe in index.ts).
    * When present the gate skips its own probe; direct callers (tests) omit
    * it and the gate probes itself. */
@@ -434,6 +438,7 @@ export async function buildWebToolMap(deps: WebToolMapDeps): Promise<Record<stri
   const headers = (key: string): Record<string, string> => ({
     "LUNAROUTE-API-KEY": key,
     ...buildAttributionHeaders(deps.sessionId),
+    ...projectHeaders(deps.readProject?.()),
   });
   const fetchImpl = deps.fetchImpl ?? (fetch as FetchLike);
 

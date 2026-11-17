@@ -387,6 +387,23 @@ describe("convert_document execute", () => {
   };
   const artifactText = "url: https://cdn.example/doc.md (link expires in 7d)\nstored doc_abc";
 
+  it("tags the MCP call with the repo project when one is set (kata zarw)", async () => {
+    const { map, server, io } = await build(
+      { tools: [{ name: "convert_document" }], callResult: () => ({ content: [{ type: "text", text: "# x" }] }) },
+      { readProject: () => "lunaroute-web" },
+    );
+    io.files.set("/tmp/report.docx", DOCX);
+    await map.convert_document.execute({ path: "/tmp/report.docx" }, ctx());
+    expect(callBodies(server.calls, "tools/call")[0].headers["LUNAROUTE-PROJECT-ID"]).toBe("lunaroute-web");
+  });
+
+  it("omits the project header when no project is set", async () => {
+    const { map, server, io } = await build({ tools: [{ name: "convert_document" }], callResult: () => ({ content: [{ type: "text", text: "# x" }] }) });
+    io.files.set("/tmp/report.docx", DOCX);
+    await map.convert_document.execute({ path: "/tmp/report.docx" }, ctx());
+    expect("LUNAROUTE-PROJECT-ID" in callBodies(server.calls, "tools/call")[0].headers).toBe(false);
+  });
+
   it("path: docx sniffed as zip → base64 + derived filename on the wire; full markdown back", async () => {
     const { map, server, io } = await build({
       tools: [{ name: "convert_document" }],

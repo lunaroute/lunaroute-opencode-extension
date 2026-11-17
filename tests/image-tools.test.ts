@@ -413,6 +413,21 @@ describe("image tool executes", () => {
     ],
   });
 
+  it("tags the MCP call with the repo project when one is set (kata zarw)", async () => {
+    const { map, server } = await build(
+      { tools: allThree(["m1"]), callResult: () => inlineImageCall("img_p") },
+      { readProject: () => "lunaroute-web" },
+    );
+    await map.generate_image.execute({ prompt: "x", model: "m1" }, ctx());
+    expect(callBodies(server.calls, "tools/call")[0].headers["LUNAROUTE-PROJECT-ID"]).toBe("lunaroute-web");
+  });
+
+  it("omits the project header when no project is set", async () => {
+    const { map, server } = await build({ tools: allThree(["m1"]), callResult: () => inlineImageCall("img_q") });
+    await map.generate_image.execute({ prompt: "x", model: "m1" }, ctx());
+    expect("LUNAROUTE-PROJECT-ID" in callBodies(server.calls, "tools/call")[0].headers).toBe(false);
+  });
+
   it("generate: hits the MCP with embed:true, lr_ key + attribution; inline bytes → saved + file:// attachment", async () => {
     const { map, server, io } = await build({ tools: allThree(["m1"]), callResult: () => inlineImageCall("img_abc") });
     const result = await map.generate_image.execute({ prompt: "a cat", model: "m1" }, ctx());
