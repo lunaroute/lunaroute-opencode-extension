@@ -13,7 +13,6 @@ import {
   findProjectRoot,
   projectFilePath,
   projectState,
-  readProject,
   validateProjectName,
   writeProject,
 } from "./project.js";
