@@ -129,6 +129,7 @@ export default Plugin.define({
       sessionId,
       log,
       enabled: () => mcpEnabled(settingsNow()),
+      project: () => readProject(projectRoot),
     });
     await mcp.register(ctx as unknown as McpCtxLike, await reader());
 
