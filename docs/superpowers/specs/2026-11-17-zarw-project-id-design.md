@@ -113,11 +113,13 @@ records only what differs and the decisions made here.
   branch on `location.project.directory` (unverified semantics, and the TUI has
   no such field — two resolvers that disagree would silently write one file and
   read another).
-- **Non-git directories:** with no `.git` ancestor the root is the launch
-  directory, so the file is written there and applies only when the location is
-  opened from that directory (or below it, via the walk-up). The command reports
-  the path it wrote; the README line says so. Read and write agree by
-  construction because both call this one resolver.
+- **Non-git directories:** with no `.git` ancestor the resolver returns the
+  launch directory, so the file is written there and applies only when the
+  launch directory *is* that directory — the walk-up looks for `.git`, not for
+  `.lunaroute.json`, so a session opened below it roots at the subdirectory and
+  does not see the file. The command reports the path it wrote, and the README
+  line says exactly that. Read and write agree by construction because both call
+  this one resolver.
 - File `<root>/.lunaroute.json`, `{"project": "<name>"}`.
 - `readProject(root, io)`: tolerant — missing file, unreadable file, bad JSON,
   wrong shape, invalid name ⇒ `undefined`, never throws. Bounded read: 4096
@@ -138,7 +140,12 @@ records only what differs and the decisions made here.
 - `projectHeaders(project)`: `{}` when unset or invalid, so spreading it leaves
   an unset request byte-identical to today; otherwise the literal pair.
 - Injectable io seam, same shape/spirit as `SettingsIo` (`src/settings.ts:55`) —
-  not `readSettings`/`writeSettings`, which are bound to the settings file.
+  not `readSettings`/`writeSettings`, which are bound to the settings file —
+  plus `existsSync` (pi's `ProjectIo` already extends `SettingsIo` with exactly
+  that, for `findProjectRoot`). That probe is what tells a missing file from an
+  invalid one for the report in §3: `readProject` returning `undefined` plus
+  `io.existsSync(projectFilePath(root))` chooses `(none)` vs `(invalid file at
+  <path>)`, and the clear-on-missing skip uses the same probe.
 - No cache in v1: the walk is a few stats and the read is bounded. The read is
   what makes a hand-edited file live; do not optimize it away without replacing
   that property.
@@ -214,14 +221,15 @@ Counterweight to the automatic effect is visibility, per §3.
 - `tests/project.test.ts`, injected fs and directory, no real repo or `$HOME`
   (temp-dir / fake-io style of `tests/settings.test.ts`): root discovery
   (`.git` directory and file), tolerant read, atomic-write failure paths,
-  validation (empty, oversize, newline, non-ASCII, `{`/`}`), `projectHeaders`.
+  validation (empty, oversize, newline, non-ASCII, `{`/`}`, and the reserved
+  words `clear`/`off` case-insensitively), `projectHeaders`.
 - Existing suites: the replayed `model.request` header and the case-insensitive
   dedupe (seed the fake event's headers with a differently-cased
   `lunaroute-project-id` and assert exactly one spelling reaches the wire,
   `tests/entry.test.ts` fake-event pattern), MCP transform before/after a
   change, tool-call headers,
-  no-file ⇒ headers byte-identical to today, and the three command forms plus
-  the `location: undefined` path (`tests/tui.test.ts` fake context needs
+  no-file ⇒ headers byte-identical to today, the three command forms, the
+  `(invalid file at <path>)` report, and the `location: undefined` path (`tests/tui.test.ts` fake context needs
   `run(input)` and a `dialog.prompt` fake).
 - `npm run check` (typecheck + vitest).
 - README: one line under attribution, mirroring pi's. `docs/smoke-checklist.md`:
