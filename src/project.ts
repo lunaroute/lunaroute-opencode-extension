@@ -117,25 +117,43 @@ export function validateProjectName(raw: string): ProjectNameResult {
   return { ok: true, name };
 }
 
-/** Read the repo's project, or undefined for every failure mode: missing file,
- * unreadable file, bad JSON, wrong shape, invalid name. Never throws — a
- * broken file must degrade to no header, not break requests. */
-export function readProject(root: string, io: ProjectIo = defaultProjectIo): string | undefined {
+/** What the file says, for the one surface that must tell a cleared repo from a
+ * broken one (the `/lunaroute` menu). `none` covers both "no file" and "the
+ * `{}` a clear writes"; a file that exists but cannot be used is `invalid`. */
+export type ProjectState = { kind: "none" } | { kind: "invalid" } | { kind: "set"; name: string };
+
+/** Read the repo's project state. Never throws — a broken file must degrade to
+ * no header, not break requests. */
+export function projectState(root: string, io: ProjectIo = defaultProjectIo): ProjectState {
   const target = projectFilePath(root);
   let raw: string;
-  let parsed: unknown;
   try {
     raw = io.readFileBytes ? strictUtf8.decode(io.readFileBytes(target)) : io.readFileSync(target);
-    if (raw.length > MAX_PROJECT_FILE_BYTES) return undefined;
+  } catch (err) {
+    // A missing file is ordinary; any other refusal is a file we cannot use.
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    return code === "ENOENT" ? { kind: "none" } : { kind: "invalid" };
+  }
+  if (raw.length > MAX_PROJECT_FILE_BYTES) return { kind: "invalid" };
+  let parsed: unknown;
+  try {
     parsed = JSON.parse(raw);
   } catch {
-    return undefined;
+    return { kind: "invalid" };
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { kind: "invalid" };
   const value = (parsed as Record<string, unknown>).project;
-  if (typeof value !== "string") return undefined;
+  if (value === undefined) return { kind: "none" }; // what clearProject leaves behind
+  if (typeof value !== "string") return { kind: "invalid" };
   const result = validateProjectName(value);
-  return result.ok ? result.name : undefined;
+  return result.ok ? { kind: "set", name: result.name } : { kind: "invalid" };
+}
+
+/** Read the repo's project, or undefined for every failure mode: missing file,
+ * unreadable file, bad JSON, wrong shape, invalid name. */
+export function readProject(root: string, io: ProjectIo = defaultProjectIo): string | undefined {
+  const state = projectState(root, io);
+  return state.kind === "set" ? state.name : undefined;
 }
 
 function writeProjectFile(root: string, body: unknown, io: ProjectIo): void {

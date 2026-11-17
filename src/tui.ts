@@ -12,6 +12,7 @@ import {
   clearProject,
   findProjectRoot,
   projectFilePath,
+  projectState,
   readProject,
   validateProjectName,
   writeProject,
@@ -162,10 +163,9 @@ function workspaceRoot(context: TuiContext): string | undefined {
 function projectSummary(context: TuiContext): string {
   const root = workspaceRoot(context);
   if (!root) return "(no workspace location)";
-  const current = readProject(root);
-  if (current) return current;
-  const path = projectFilePath(root);
-  return existsSync(path) ? `(invalid file at ${path})` : "(none)";
+  const state = projectState(root);
+  if (state.kind === "set") return state.name;
+  return state.kind === "invalid" ? `(invalid file at ${projectFilePath(root)})` : "(none)";
 }
 
 /** `project <name>` → the name, bare `project` → "", anything else → undefined
@@ -199,12 +199,14 @@ async function project(context: TuiContext, arg: string): Promise<void> {
 }
 
 async function promptProject(context: TuiContext, root: string): Promise<void> {
-  const current = readProject(root);
+  const state = projectState(root);
+  const current = state.kind === "set" ? state.name : undefined;
+  const path = projectFilePath(root);
   const folder = basename(root);
   const suggestion = validateProjectName(folder).ok ? folder : "";
   const answer = await context.ui.dialog.prompt({
     title: "LunaRoute project",
-    description: `${current ?? projectSummary(context)} — ${projectFilePath(root)}`,
+    description: state.kind === "invalid" ? `(invalid file at ${path})` : `${current ?? "(none)"} — ${path}`,
     value: current ?? suggestion,
     placeholder: current && suggestion ? suggestion : "(new name)",
   });

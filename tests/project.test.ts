@@ -10,6 +10,7 @@ import {
   findProjectRoot,
   projectFilePath,
   projectHeaders,
+  projectState,
   readProject,
   validateProjectName,
   writeProject,
@@ -102,6 +103,32 @@ describe("readProject", () => {
   it("reads the same file through readFileSync when no byte reader is given", () => {
     expect(readProject(ROOT, fakeIo({ readFileSync: () => '{"project":"web"}' }))).toBe("web");
     expect(readProject(ROOT, fakeIo({ readFileSync: () => "x".repeat(4097) }))).toBeUndefined();
+  });
+});
+
+describe("projectState", () => {
+  it("reports a missing file and a cleared file as none", () => {
+    expect(projectState(ROOT, fakeIo()).kind).toBe("none");
+    expect(projectState(ROOT, bytesIo("{}\n")).kind).toBe("none");
+    expect(projectState(ROOT, bytesIo('{"other":1}')).kind).toBe("none");
+  });
+
+  it("reports the value when one is set", () => {
+    expect(projectState(ROOT, bytesIo('{"project":"lunaroute-web"}'))).toEqual({ kind: "set", name: "lunaroute-web" });
+  });
+
+  it("separates an unreadable or invalid file from a cleared one", () => {
+    const invalid: ProjectIo[] = [
+      bytesIo("{oops"),
+      bytesIo("[]"),
+      bytesIo('{"project":42}'),
+      bytesIo('{"project":"{x}"}'),
+      bytesIo('{"project":"clear"}'),
+      bytesIo("x".repeat(4097)),
+      fakeIo({ readFileBytes: () => new Uint8Array([0x7b, 0xff, 0x7d]) }),
+      fakeIo({ readFileBytes: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } }),
+    ];
+    for (const io of invalid) expect(projectState(ROOT, io).kind, String(io)).toBe("invalid");
   });
 });
 

@@ -236,6 +236,18 @@ describe("/lunaroute v2 TUI plugin", () => {
       expect(String(selects[0].options[0].description)).toContain("lunaroute-web");
     });
 
+    it("menu row reports none after a clear, not a corrupt file", async () => {
+      writeFileSync(file(), '{"project":"lunaroute-web"}\n');
+      const { context, commands, selects } = at(() => undefined);
+      await tui.setup(context as never);
+      await commands[0].run("project clear");
+      selects.length = 0;
+      await commands[0].run();
+
+      expect(String(selects[0].options[0].description)).toContain("(none)");
+      expect(String(selects[0].options[0].description)).not.toContain("invalid");
+    });
+
     it("menu row reports an unreadable file distinctly from none", async () => {
       writeFileSync(file(), "{oops");
       const { context, commands, selects } = at(() => undefined);
